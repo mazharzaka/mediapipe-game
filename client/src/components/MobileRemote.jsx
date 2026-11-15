@@ -29,7 +29,10 @@ export default function MobileRemote() {
         if (hand) {
           const p = hand[9]; // middle finger base (palm center)
           // Front camera is mirrored, so flip X
-          socket.emit('handMove', { x: clampPercent(1 - p.x), y: clampPercent(p.y) });
+          const d = (a, b) => Math.hypot(a.x - b.x, a.y - b.y);
+          const tips = [8, 12, 16, 20].reduce((s, i) => s + d(hand[i], hand[0]), 0) / 4;
+          const isPunching = tips < d(hand[9], hand[0]) * 1.3; // closed fist
+          socket.emit('handMove', { x: clampPercent(1 - p.x), y: clampPercent(p.y), isPunching });
           setStatus('Hand detected');
         } else {
           setStatus('No hand detected');
@@ -90,4 +93,5 @@ export default function MobileRemote() {
     </div>
   );
 }
+
 
