@@ -1,17 +1,18 @@
-import { useState, useEffect, useRef, useCallback } from "react";
-import { Link } from "react-router-dom";
-import { FilesetResolver, FaceLandmarker } from "@mediapipe/tasks-vision";
-import { socket, SERVER_URL } from "../socket";
+import { useState, useEffect, useRef, useCallback } from 'react';
+import { Link } from 'react-router-dom';
+import { FilesetResolver, FaceLandmarker } from '@mediapipe/tasks-vision';
+import { socket, SERVER_URL } from '../socket';
 
-const WASM_URL =
-  "https://cdn.jsdelivr.net/npm/@mediapipe/tasks-vision@latest/wasm";
+const WASM_URL = 'https://cdn.jsdelivr.net/npm/@mediapipe/tasks-vision@latest/wasm';
 const MODEL_URL =
-  "https://storage.googleapis.com/mediapipe-models/face_landmarker/face_landmarker/float16/1/face_landmarker.task";
+  'https://storage.googleapis.com/mediapipe-models/face_landmarker/face_landmarker/float16/1/face_landmarker.task';
 
 // Landmark index 1 is canonical Nose Tip in MediaPipe Face Mesh
 const NOSE_TIP_INDEX = 1;
-const THROTTLE_MS = 20; // Fast 20ms throttling (50 Hz) for smooth real-time control
-const DEAD_ZONE = 0.004; // Micro-jitter prevention threshold
+const THROTTLE_MS = 50; // Strict 50ms throttling (20 Hz) for mouse move
+const CLICK_COOLDOWN_MS = 600; // 600ms cooldown for clicks
+const SCROLL_THROTTLE_MS = 80; // 80ms throttle for scroll events
+const SCROLL_DEADZONE = 0.005; // Vertical deadzone for head tilt scroll
 
 export default function AssistiveController() {
   const videoRef = useRef(null);
@@ -22,48 +23,48 @@ export default function AssistiveController() {
   const isTrackingRef = useRef(false);
 
   // Vision model & connection state
-  const [modelStatus, setModelStatus] = useState(
-    "Initializing camera & model...",
-  );
+  const [modelStatus, setModelStatus] = useState('Initializing camera & model...');
   const [isModelReady, setIsModelReady] = useState(false);
   const [faceDetected, setFaceDetected] = useState(false);
   const [socketConnected, setSocketConnected] = useState(socket.connected);
 
-  // Non-linear precision curve mode (Enabled by default)
-  const [precisionMode, setPrecisionMode] = useState(true);
-  const precisionModeRef = useRef(true);
+  // Active Zone & Ergonomics State
+  const [sensitivity, setSensitivity] = useState(2.5);
+  const sensitivityRef = useRef(2.5);
 
-  // Ergonomics: Independent X and Y sensitivities
-  const [sensitivityX, setSensitivityX] = useState(1.8);
-  const sensitivityXRef = useRef(1.8);
-
-  const [sensitivityY, setSensitivityY] = useState(3.5);
-  const sensitivityYRef = useRef(3.5);
-
-  // Smoothing factor for EMA filter: smooth = prev * smoothing + current * (1 - smoothing)
-  // Default changed to 0.65 (65%) to eliminate lag and swimming sensation
-  const [smoothing, setSmoothing] = useState(0.65);
-  const smoothingRef = useRef(0.65);
-
-  // Ergonomics: Center calibration point
   const [centerPos, setCenterPos] = useState({ x: 0.5, y: 0.5 });
   const centerPosRef = useRef({ x: 0.5, y: 0.5 });
-
-  // Recenter countdown & audio feedback state
-  const [countdown, setCountdown] = useState(null);
-  const [recenterFeedback, setRecenterFeedback] = useState(false);
-  const countdownTimerRef = useRef(null);
 
   // Latest raw mirrored nose position for recentering
   const latestRawNoseRef = useRef({ x: 0.5, y: 0.5 });
 
-  // Smoothed coordinates via EMA
+  // Smoothed coordinates via EMA (Exponential Moving Average)
   const smoothedPosRef = useRef({ x: 0.5, y: 0.5 });
 
   // Telemetry state for UI
   const [coords, setCoords] = useState({ x: 0.5, y: 0.5 });
   const [rawCoords, setRawCoords] = useState({ x: 0.5, y: 0.5 });
   const [packetsSent, setPacketsSent] = useState(0);
+  const [recenterFeedback, setRecenterFeedback] = useState(false);
+
+  // Blendshapes & Gesture state
+  const [gestureStatus, setGestureStatus] = useState('Standby');
+  const [blendshapesData, setBlendshapesData] = useState({
+    browInnerUp: 0,
+    jawRight: 0,
+    jawLeft: 0,
+    jawOpen: 0,
+  });
+
+  // Refs for tracking loop (avoids stale closures)
+  const lastEmitTimeRef = useRef(0);
+  const lastClickTimeRef = useRef(0);
+  const lastScrollTimeRef = useRef(0);
+  const lastScrollNoseYRef = useRef(null);
+  const isScrollModeRef = useRef(false);
+  const prevGestureStatusRef = useRef('Standby');
+  const clickFeedbackUntilRef = useRef(0);
+  const lastTelemetryUpdateRef = useRef(0);
 
   // Synchronize state to refs for animation loop
   useEffect(() => {
@@ -71,146 +72,24 @@ export default function AssistiveController() {
   }, [isTracking]);
 
   useEffect(() => {
-    precisionModeRef.current = precisionMode;
-  }, [precisionMode]);
-
-  useEffect(() => {
-    sensitivityXRef.current = sensitivityX;
-  }, [sensitivityX]);
-
-  useEffect(() => {
-    sensitivityYRef.current = sensitivityY;
-  }, [sensitivityY]);
-
-  useEffect(() => {
-    smoothingRef.current = smoothing;
-  }, [smoothing]);
+    sensitivityRef.current = sensitivity;
+  }, [sensitivity]);
 
   useEffect(() => {
     centerPosRef.current = centerPos;
   }, [centerPos]);
-
-  // Audio tone synthesis via Web Audio API (Clinical acoustic feedback)
-  const playAudioTone = useCallback(
-    (freq = 440, duration = 0.08, type = "sine") => {
-      try {
-        const AudioCtx = window.AudioContext || window.webkitAudioContext;
-        if (!AudioCtx) return;
-        const ctx = new AudioCtx();
-        const osc = ctx.createOscillator();
-        const gain = ctx.createGain();
-
-        osc.type = type;
-        osc.frequency.setValueAtTime(freq, ctx.currentTime);
-
-        gain.gain.setValueAtTime(0.12, ctx.currentTime);
-        gain.gain.exponentialRampToValueAtTime(
-          0.001,
-          ctx.currentTime + duration,
-        );
-
-        osc.connect(gain);
-        gain.connect(ctx.destination);
-
-        osc.start(ctx.currentTime);
-        osc.stop(ctx.currentTime + duration);
-
-        setTimeout(
-          () => {
-            ctx.close();
-          },
-          (duration + 0.1) * 1000,
-        );
-      } catch {
-        // Audio autoplay policy fallback
-      }
-    },
-    [],
-  );
-
-  const playChimeTone = useCallback(() => {
-    try {
-      const AudioCtx = window.AudioContext || window.webkitAudioContext;
-      if (!AudioCtx) return;
-      const ctx = new AudioCtx();
-      const osc = ctx.createOscillator();
-      const gain = ctx.createGain();
-
-      osc.type = "triangle";
-      osc.frequency.setValueAtTime(587.33, ctx.currentTime); // D5
-      osc.frequency.exponentialRampToValueAtTime(880, ctx.currentTime + 0.14); // A5
-
-      gain.gain.setValueAtTime(0.15, ctx.currentTime);
-      gain.gain.exponentialRampToValueAtTime(0.001, ctx.currentTime + 0.3);
-
-      osc.connect(gain);
-      gain.connect(ctx.destination);
-
-      osc.start(ctx.currentTime);
-      osc.stop(ctx.currentTime + 0.3);
-
-      setTimeout(() => {
-        ctx.close();
-      }, 450);
-    } catch {
-      // Audio fallback
-    }
-  }, []);
-
-  // 3-Second Recenter Countdown with audio feedback
-  const handleStartRecenterCountdown = useCallback(() => {
-    if (countdown !== null) return; // Prevent multiple clicks during countdown
-
-    setRecenterFeedback(false);
-    setCountdown(3);
-    playAudioTone(440, 0.07); // Tick 3
-
-    let step = 3;
-    const intervalId = setInterval(() => {
-      step -= 1;
-      if (step > 0) {
-        setCountdown(step);
-        playAudioTone(step === 2 ? 494 : 587, 0.07); // Tick 2 & 1
-      } else {
-        clearInterval(intervalId);
-        countdownTimerRef.current = null;
-        setCountdown(null);
-
-        // Calibrate: Save current nose coordinate as screen center
-        const current = latestRawNoseRef.current;
-        setCenterPos({ x: current.x, y: current.y });
-        smoothedPosRef.current = { x: 0.5, y: 0.5 };
-
-        // Sound completion chime
-        playChimeTone();
-
-        setRecenterFeedback(true);
-        setTimeout(() => setRecenterFeedback(false), 2000);
-      }
-    }, 1000);
-
-    countdownTimerRef.current = intervalId;
-  }, [countdown, playAudioTone, playChimeTone]);
-
-  useEffect(() => {
-    return () => {
-      if (countdownTimerRef.current) {
-        clearInterval(countdownTimerRef.current);
-      }
-    };
-  }, []);
 
   // Socket connection tracking
   useEffect(() => {
     const onConnect = () => setSocketConnected(true);
     const onDisconnect = () => setSocketConnected(false);
 
-    socket.on("connect", onConnect);
-    socket.on("disconnect", onDisconnect);
+    socket.on('connect', onConnect);
+    socket.on('disconnect', onDisconnect);
 
     return () => {
-      socket.off("connect", onConnect);
-      socket.off("disconnect", onDisconnect);
+      socket.off('connect', onConnect);
+      socket.off('disconnect', onDisconnect);
     };
   }, []);
 
@@ -221,7 +100,6 @@ export default function AssistiveController() {
     let stream = null;
     let landmarker = null;
     let lastVideoTime = -1;
-    let lastEmitTime = 0;
 
     const renderLoop = () => {
       if (cancelled) return;
@@ -239,134 +117,111 @@ export default function AssistiveController() {
         const timestamp = performance.now();
         const result = landmarker.detectForVideo(video, timestamp);
         const face = result.faceLandmarks?.[0];
+        const blendshapes = result.faceBlendshapes?.[0]?.categories;
 
         if (canvas) {
-          const ctx = canvas.getContext("2d");
+          const ctx = canvas.getContext('2d');
           if (ctx) {
             ctx.clearRect(0, 0, canvas.width, canvas.height);
           }
+        }
+
+        // 1. Extract Blendshape expression scores
+        let browInnerUp = 0;
+        let jawRight = 0;
+        let jawLeft = 0;
+        let jawOpen = 0;
+
+        if (blendshapes) {
+          for (let i = 0; i < blendshapes.length; i++) {
+            const b = blendshapes[i];
+            if (b.categoryName === 'browInnerUp') browInnerUp = b.score;
+            else if (b.categoryName === 'jawRight') jawRight = b.score;
+            else if (b.categoryName === 'jawLeft') jawLeft = b.score;
+            else if (b.categoryName === 'jawOpen') jawOpen = b.score;
+          }
+        }
+
+        // Throttle telemetry update to UI for 60fps smoothness
+        if (timestamp - lastTelemetryUpdateRef.current >= 100) {
+          lastTelemetryUpdateRef.current = timestamp;
+          setBlendshapesData({ browInnerUp, jawRight, jawLeft, jawOpen });
         }
 
         if (face && face[NOSE_TIP_INDEX]) {
           setFaceDetected(true);
           const rawNose = face[NOSE_TIP_INDEX];
 
-          // Front camera mirrored horizontally:
+          // Front camera is mirrored horizontally:
           const noseX = 1 - rawNose.x;
           const noseY = rawNose.y;
 
           latestRawNoseRef.current = { x: noseX, y: noseY };
           setRawCoords({ x: noseX, y: noseY });
 
-          // 1. Calculate delta from center
-          const sensX = sensitivityXRef.current;
-          const sensY = sensitivityYRef.current;
-          const smoothFactor = smoothingRef.current;
+          // Active Zone Mapping from centerPos
+          const sens = sensitivityRef.current;
           const center = centerPosRef.current;
-          const usePrecision = precisionModeRef.current;
+          const mappedX = 0.5 + (noseX - center.x) * sens;
+          const mappedY = 0.5 + (noseY - center.y) * sens;
 
-          const dx = noseX - center.x;
-          const dy = noseY - center.y;
-
-          let mappedX;
-          let mappedY;
-
-          if (usePrecision) {
-            // Non-linear precision curve: Power of 1.35 on normalized displacement
-            // Small movements around center are slow and delicate for targeting small buttons;
-            // Larger movements accelerate smoothly to cover screen extremities.
-            const maxDx = 0.5 / sensX;
-            const normX = dx / maxDx;
-            const curvedNormX =
-              Math.sign(normX) * Math.pow(Math.abs(normX), 1.35);
-            mappedX = 0.5 + curvedNormX * 0.5;
-
-            const maxDy = 0.5 / sensY;
-            const normDy = dy / maxDy;
-            const curvedNormDy =
-              Math.sign(normDy) * Math.pow(Math.abs(normDy), 1.35);
-            mappedY = 0.5 + curvedNormDy * 0.5;
-          } else {
-            // Standard linear mapping
-            mappedX = 0.5 + dx * sensX;
-            mappedY = 0.5 + dy * sensY;
-          }
-
-          // 2. Clamp between 0 and 1
           const clampedMappedX = Math.max(0, Math.min(1, mappedX));
           const clampedMappedY = Math.max(0, Math.min(1, mappedY));
 
-          // 3. Dead Zone check (0.004) and EMA Smoothing filter
+          // Simple Exponential Moving Average (EMA) smoothing
           const prev = smoothedPosRef.current;
-          const deltaX = Math.abs(clampedMappedX - prev.x);
-          const deltaY = Math.abs(clampedMappedY - prev.y);
+          const smoothX = prev.x * 0.7 + clampedMappedX * 0.3;
+          const smoothY = prev.y * 0.7 + clampedMappedY * 0.3;
 
-          let finalX = prev.x;
-          let finalY = prev.y;
+          const finalX = Math.max(0, Math.min(1, smoothX));
+          const finalY = Math.max(0, Math.min(1, smoothY));
 
-          if (deltaX >= DEAD_ZONE || deltaY >= DEAD_ZONE) {
-            // Formula: smooth = prev * smoothing + current * (1 - smoothing)
-            const smoothX =
-              prev.x * smoothFactor + clampedMappedX * (1 - smoothFactor);
-            const smoothY =
-              prev.y * smoothFactor + clampedMappedY * (1 - smoothFactor);
-
-            finalX = Math.max(0, Math.min(1, smoothX));
-            finalY = Math.max(0, Math.min(1, smoothY));
-
-            smoothedPosRef.current = { x: finalX, y: finalY };
-            setCoords({ x: finalX, y: finalY });
-          }
-
-          // 4. Draw high-contrast utilitarian overlays on canvas
+          // Draw high-contrast utilitarian overlays on canvas
           if (canvas) {
-            const ctx = canvas.getContext("2d");
+            const ctx = canvas.getContext('2d');
             if (ctx) {
               const cw = canvas.width;
               const ch = canvas.height;
 
-              // A. Draw Active Zone Box (independent width and height)
-              const halfBoxW = (0.5 / sensX) * cw;
-              const halfBoxH = (0.5 / sensY) * ch;
+              // Active Zone Box
+              const halfBoxW = (0.5 / sens) * cw;
+              const halfBoxH = (0.5 / sens) * ch;
               const boxCenterX = center.x * cw;
               const boxCenterY = center.y * ch;
 
-              ctx.strokeStyle = "#3F3F46"; // zinc-700
+              ctx.strokeStyle = '#3F3F46'; // zinc-700
               ctx.lineWidth = 2;
               ctx.setLineDash([6, 6]);
               ctx.strokeRect(
                 boxCenterX - halfBoxW,
                 boxCenterY - halfBoxH,
                 halfBoxW * 2,
-                halfBoxH * 2,
+                halfBoxH * 2
               );
               ctx.setLineDash([]);
 
-              // B. Draw Center Reference Point
-              ctx.fillStyle = "#D97706"; // amber-600
+              // Center Reference Point
+              ctx.fillStyle = '#D97706'; // amber-600
               ctx.beginPath();
               ctx.arc(boxCenterX, boxCenterY, 5, 0, 2 * Math.PI);
               ctx.fill();
 
-              // C. Draw Current Nose Pointer Crosshair
+              // Nose Pointer Crosshair
               const nosePxX = noseX * cw;
               const nosePxY = noseY * ch;
 
-              ctx.strokeStyle = isTrackingRef.current ? "#22C55E" : "#D97706";
+              ctx.strokeStyle = isTrackingRef.current ? '#22C55E' : '#D97706';
               ctx.lineWidth = 3;
 
-              // Outer Ring
               ctx.beginPath();
               ctx.arc(nosePxX, nosePxY, 16, 0, 2 * Math.PI);
               ctx.stroke();
 
-              // Center Dot
-              ctx.fillStyle = isTrackingRef.current ? "#22C55E" : "#D97706";
+              ctx.fillStyle = isTrackingRef.current ? '#22C55E' : '#D97706';
               ctx.beginPath();
               ctx.arc(nosePxX, nosePxY, 4, 0, 2 * Math.PI);
               ctx.fill();
 
-              // Crosshair tick marks
               ctx.beginPath();
               ctx.moveTo(nosePxX - 22, nosePxY);
               ctx.lineTo(nosePxX + 22, nosePxY);
@@ -376,113 +231,219 @@ export default function AssistiveController() {
             }
           }
 
-          // 5. High-Frequency Throttle: 20ms (50 Hz) for smooth cursor gliding
-          if (isTrackingRef.current) {
-            const now = performance.now();
-            if (now - lastEmitTime >= THROTTLE_MS) {
-              lastEmitTime = now;
-              socket.emit("assistiveMove", { x: finalX, y: finalY });
-              setPacketsSent((prev) => prev + 1);
+              // 2. Gesture Evaluation & Freeze-on-Gesture Logic
+              const maxJawSide = Math.max(jawRight, jawLeft);
+              const isScrollMode = jawOpen > 0.45;
+              const isFrozen = browInnerUp > 0.25 || maxJawSide > 0.25;
+
+              let currentStatus = isTrackingRef.current ? 'Tracking Active' : 'Standby';
+
+              // A. Trigger Click Gestures (with 600ms cooldown)
+              if (browInnerUp > 0.45 && timestamp - lastClickTimeRef.current >= CLICK_COOLDOWN_MS) {
+                lastClickTimeRef.current = timestamp;
+                clickFeedbackUntilRef.current = timestamp + 500;
+                if (isTrackingRef.current) {
+                  socket.emit('mouse_click', { button: 'left' });
+                }
+              } else if (
+                maxJawSide > 0.40 &&
+                timestamp - lastClickTimeRef.current >= CLICK_COOLDOWN_MS
+              ) {
+                lastClickTimeRef.current = timestamp;
+                clickFeedbackUntilRef.current = timestamp + 500;
+                if (isTrackingRef.current) {
+                  socket.emit('mouse_click', { button: 'right' });
+                }
+              }
+
+              // B. Scroll Mode (jawOpen > 0.45)
+              if (isScrollMode) {
+                if (!isScrollModeRef.current || lastScrollNoseYRef.current === null) {
+                  lastScrollNoseYRef.current = noseY;
+                  isScrollModeRef.current = true;
+                }
+
+                const dy = noseY - lastScrollNoseYRef.current;
+                if (timestamp - lastScrollTimeRef.current >= SCROLL_THROTTLE_MS) {
+                  if (dy < -SCROLL_DEADZONE) {
+                    // Head tilted upward -> Scroll Up
+                    if (isTrackingRef.current) {
+                      socket.emit('mouse_scroll', { direction: 'up', dy, amount: 2 });
+                    }
+                    lastScrollTimeRef.current = timestamp;
+                    lastScrollNoseYRef.current = noseY;
+                  } else if (dy > SCROLL_DEADZONE) {
+                    // Head tilted downward -> Scroll Down
+                    if (isTrackingRef.current) {
+                      socket.emit('mouse_scroll', { direction: 'down', dy, amount: 2 });
+                    }
+                    lastScrollTimeRef.current = timestamp;
+                    lastScrollNoseYRef.current = noseY;
+                  }
+                }
+
+                currentStatus = 'Scroll Mode';
+              } else {
+                isScrollModeRef.current = false;
+                lastScrollNoseYRef.current = null;
+
+                // C. Mouse Cursor Movement with Freeze-on-Gesture
+                if (isFrozen) {
+                  // Cursor is anchored in place: do NOT emit movement to prevent drift
+                  currentStatus = 'Frozen';
+                } else {
+                  // Not frozen and not scrolling: update smoothed coordinates and emit
+                  smoothedPosRef.current = { x: finalX, y: finalY };
+                  setCoords({ x: finalX, y: finalY });
+
+                  if (isTrackingRef.current) {
+                    currentStatus = 'Tracking Active';
+                    if (timestamp - lastEmitTimeRef.current >= THROTTLE_MS) {
+                      lastEmitTimeRef.current = timestamp;
+                      socket.emit('assistiveMove', { x: finalX, y: finalY });
+                      setPacketsSent((prev) => prev + 1);
+                    }
+                  }
+                }
+              }
+
+              // Prioritize showing Click badge for 500ms after a click
+              if (timestamp < clickFeedbackUntilRef.current) {
+                currentStatus = browInnerUp > 0.45 ? 'Left Click' : 'Right Click';
+              }
+
+              if (currentStatus !== prevGestureStatusRef.current) {
+                prevGestureStatusRef.current = currentStatus;
+                setGestureStatus(currentStatus);
+              }
+            } else {
+              setFaceDetected(false);
+              if (prevGestureStatusRef.current !== 'Standby') {
+                prevGestureStatusRef.current = 'Standby';
+                setGestureStatus('Standby');
+              }
             }
           }
-        } else {
-          setFaceDetected(false);
-        }
-      }
 
-      rafId = requestAnimationFrame(renderLoop);
-    };
+          rafId = requestAnimationFrame(renderLoop);
+        };
 
-    const videoEl = videoRef.current;
-    (async () => {
-      try {
-        setModelStatus("Requesting camera access / جاري طلب إذن الكاميرا...");
-        stream = await navigator.mediaDevices.getUserMedia({
-          video: {
-            facingMode: "user",
-            width: { ideal: 1280 },
-            height: { ideal: 720 },
-          },
-          audio: false,
-        });
+        const videoEl = videoRef.current;
+        (async () => {
+          try {
+            setModelStatus('Requesting camera access / جاري طلب إذن الكاميرا...');
+            stream = await navigator.mediaDevices.getUserMedia({
+              video: {
+                facingMode: 'user',
+                width: { ideal: 1280 },
+                height: { ideal: 720 },
+              },
+              audio: false,
+            });
 
-        if (cancelled) {
-          stream.getTracks().forEach((t) => t.stop());
-          return;
-        }
+            if (cancelled) {
+              stream.getTracks().forEach((t) => t.stop());
+              return;
+            }
 
-        if (videoRef.current) {
-          videoRef.current.srcObject = stream;
-          await videoRef.current.play();
-        }
+            if (videoRef.current) {
+              videoRef.current.srcObject = stream;
+              await videoRef.current.play();
+            }
 
-        setModelStatus(
-          "Loading FaceLandmarker model / جاري تحميل نموذج التتبع...",
-        );
-        const visionFileset = await FilesetResolver.forVisionTasks(WASM_URL);
-        const lm = await FaceLandmarker.createFromOptions(visionFileset, {
-          baseOptions: {
-            modelAssetPath: MODEL_URL,
-            delegate: "GPU",
-          },
-          runningMode: "VIDEO",
-          numFaces: 1,
-        });
+            setModelStatus('Loading FaceLandmarker model / جاري تحميل نموذج التتبع...');
+            const visionFileset = await FilesetResolver.forVisionTasks(WASM_URL);
+            const lm = await FaceLandmarker.createFromOptions(visionFileset, {
+              baseOptions: {
+                modelAssetPath: MODEL_URL,
+                delegate: 'GPU',
+              },
+              outputFaceBlendshapes: true,
+              runningMode: 'VIDEO',
+              numFaces: 1,
+            });
 
-        if (cancelled) {
-          lm.close();
-          return;
-        }
+            if (cancelled) {
+              lm.close();
+              return;
+            }
 
-        landmarker = lm;
-        setIsModelReady(true);
-        setModelStatus(
-          "Ready. Keep your face in frame / جاهز. حافظ على وجهك داخل الإطار.",
-        );
-        renderLoop();
-      } catch (err) {
-        console.error("Assistive setup error:", err);
-        if (!cancelled) {
-          setModelStatus(
-            `Error: ${err.message || "Could not initialize camera/model"}`,
-          );
-        }
-      }
-    })();
+            landmarker = lm;
+            setIsModelReady(true);
+            setModelStatus('Ready. Keep your face in frame / جاهز. حافظ على وجهك داخل الإطار.');
+            renderLoop();
+          } catch (err) {
+            console.error('Assistive setup error:', err);
+            if (!cancelled) {
+              setModelStatus(`Error: ${err.message || 'Could not initialize camera/model'}`);
+            }
+          }
+        })();
 
-    return () => {
-      cancelled = true;
-      cancelAnimationFrame(rafId);
-      if (stream) {
-        stream.getTracks().forEach((track) => track.stop());
-      }
-      if (videoEl) {
-        videoEl.srcObject = null;
-      }
-      landmarker?.close();
-    };
-  }, []);
+        return () => {
+          cancelled = true;
+          cancelAnimationFrame(rafId);
+          if (stream) {
+            stream.getTracks().forEach((track) => track.stop());
+          }
+          if (videoEl) {
+            videoEl.srcObject = null;
+          }
+          landmarker?.close();
+        };
+      }, []);
 
   const toggleTracking = useCallback(() => {
     setIsTracking((prev) => !prev);
   }, []);
 
-  const changeSensitivityX = (newVal) => {
-    const clamped = Math.max(0.5, Math.min(5.0, Math.round(newVal * 10) / 10));
-    setSensitivityX(clamped);
+  // Recenter: Save current nose coordinates as new centerPos
+  const handleRecenter = useCallback(() => {
+    const current = latestRawNoseRef.current;
+    setCenterPos({ x: current.x, y: current.y });
+    smoothedPosRef.current = { x: 0.5, y: 0.5 };
+    setRecenterFeedback(true);
+    setTimeout(() => setRecenterFeedback(false), 1500);
+  }, []);
+
+  const changeSensitivity = (newVal) => {
+    const clamped = Math.max(1.0, Math.min(5.0, Math.round(newVal * 2) / 2));
+    setSensitivity(clamped);
   };
 
-  const changeSensitivityY = (newVal) => {
-    const clamped = Math.max(0.5, Math.min(6.0, Math.round(newVal * 10) / 10));
-    setSensitivityY(clamped);
+  // Helper for rendering high-contrast WCAG AAA Status Badge
+  const getBadgeStyle = () => {
+    switch (gestureStatus) {
+      case 'Left Click':
+        return 'bg-teal-600 border-2 border-teal-300 text-white';
+      case 'Right Click':
+        return 'bg-blue-600 border-2 border-blue-300 text-white';
+      case 'Scroll Mode':
+        return 'bg-purple-600 border-2 border-purple-300 text-white';
+      case 'Frozen':
+        return 'bg-amber-600 border-2 border-amber-300 text-white';
+      case 'Tracking Active':
+        return 'bg-green-600 border-2 border-green-300 text-white';
+      default:
+        return 'bg-zinc-800 border-2 border-zinc-600 text-zinc-300';
+    }
   };
 
-  const changeSmoothing = (newVal) => {
-    const clamped = Math.max(
-      0.5,
-      Math.min(0.92, Math.round(newVal * 100) / 100),
-    );
-    setSmoothing(clamped);
+  const getBadgeIcon = () => {
+    switch (gestureStatus) {
+      case 'Left Click':
+        return '👆';
+      case 'Right Click':
+        return '👉';
+      case 'Scroll Mode':
+        return '↕';
+      case 'Frozen':
+        return '❄';
+      case 'Tracking Active':
+        return '●';
+      default:
+        return '■';
+    }
   };
 
   return (
@@ -506,8 +467,7 @@ export default function AssistiveController() {
             </h1>
           </div>
           <p className="text-zinc-300 text-base sm:text-lg">
-            تحكم مريح بماوس الويندوز بحركة الأنف — تقنية مساعدة معتمدة (WCAG
-            AAA)
+            تحكم مريح بماوس الويندوز بحركة الأنف وتعبيرات الوجه — تقنية مساعدة معتمدة (WCAG AAA)
           </p>
         </div>
 
@@ -518,13 +478,12 @@ export default function AssistiveController() {
           aria-live="polite"
         >
           <span
-            className={`inline-block w-3.5 h-3.5 rounded-full ${
-              socketConnected ? "bg-green-500" : "bg-red-500"
-            }`}
+            className={`inline-block w-3.5 h-3.5 rounded-full ${socketConnected ? 'bg-green-500' : 'bg-red-500'
+              }`}
             aria-hidden="true"
           />
           <span className="text-base font-semibold text-zinc-200">
-            {socketConnected ? "[●] Server Connected" : "[■] Server Offline"}
+            {socketConnected ? '[●] Server Connected' : '[■] Server Offline'}
           </span>
         </div>
       </header>
@@ -535,16 +494,15 @@ export default function AssistiveController() {
           type="button"
           onClick={toggleTracking}
           disabled={!isModelReady}
-          className={`w-full min-h-24 px-6 py-5 rounded-xl text-xl sm:text-2xl font-bold tracking-wide transition-colors duration-150 flex items-center justify-center gap-4 border-2 focus-visible:outline-none focus-visible:ring-4 focus-visible:ring-amber-400 focus-visible:ring-offset-4 focus-visible:ring-offset-zinc-950 disabled:opacity-50 disabled:cursor-not-allowed ${
-            isTracking
-              ? "bg-red-600 hover:bg-red-500 text-white border-red-300 shadow-none"
-              : "bg-teal-600 hover:bg-teal-500 text-white border-teal-300 shadow-none"
-          }`}
+          className={`w-full min-h-24 px-6 py-5 rounded-xl text-xl sm:text-2xl font-bold tracking-wide transition-colors duration-150 flex items-center justify-center gap-4 border-2 focus-visible:outline-none focus-visible:ring-4 focus-visible:ring-amber-400 focus-visible:ring-offset-4 focus-visible:ring-offset-zinc-950 disabled:opacity-50 disabled:cursor-not-allowed ${isTracking
+              ? 'bg-red-600 hover:bg-red-500 text-white border-red-300 shadow-none'
+              : 'bg-teal-600 hover:bg-teal-500 text-white border-teal-300 shadow-none'
+            }`}
           aria-pressed={isTracking}
           aria-label={
             isTracking
-              ? "Safety Emergency Stop: Stop Tracking Mouse"
-              : "Start Tracking: Begin Moving Mouse with Head"
+              ? 'Safety Emergency Stop: Stop Tracking Mouse'
+              : 'Start Tracking: Begin Moving Mouse with Head'
           }
         >
           {isTracking ? (
@@ -567,273 +525,107 @@ export default function AssistiveController() {
 
       {/* Main Grid: Ergonomics Controls & Telemetry + Camera Feed */}
       <div className="grid grid-cols-1 lg:grid-cols-12 gap-6">
-        {/* Left Column: Ergonomics, Precision Toggle, Sensitivities, Recenter & Telemetry */}
+        {/* Left Column: Ergonomics, Sensitivity Slider, Recenter & Telemetry */}
         <section
           className="lg:col-span-5 flex flex-col gap-6"
           aria-label="Head Ergonomics and Telemetry"
         >
-          {/* Recenter / ضبط المركز Button with 3-Second Countdown & Sound */}
+          {/* Recenter / ضبط المركز Button (Large, Highly Accessible) */}
           <div className="p-6 rounded-xl bg-zinc-900 border border-zinc-700 flex flex-col gap-3">
             <h2 className="text-xl font-bold text-zinc-50 border-b border-zinc-700 pb-2">
               ضبط المركز والزاوية / Recenter
             </h2>
             <p className="text-base text-zinc-300 leading-relaxed">
-              عند الضغط، يبدأ عد تنازلي 3 ثوانٍ مع صوت تنبيه خفيف لتتمكن من
-              النظر لمنتصف شاشة اللابتوب بوضعية مريحة قبل التثبيت.
+              ثبّت رأسك في الوضعية الأكثر راحة لك، ثم اضغط على الزر ليصبح موضع أنفك الحالي هو منتصف الشاشة.
             </p>
 
             <button
               type="button"
-              onClick={handleStartRecenterCountdown}
-              disabled={countdown !== null}
-              className={`w-full min-h-16 px-6 py-4 rounded-xl font-bold text-xl flex items-center justify-center gap-3 border-2 transition-colors duration-150 focus-visible:outline-none focus-visible:ring-4 focus-visible:ring-amber-400 focus-visible:ring-offset-2 focus-visible:ring-offset-zinc-950 disabled:cursor-not-allowed ${
-                recenterFeedback
-                  ? "bg-green-600 text-white border-green-300"
-                  : countdown !== null
-                    ? "bg-amber-700 text-white border-amber-300"
-                    : "bg-amber-600 hover:bg-amber-500 text-white border-amber-300"
-              }`}
-              aria-label={
-                countdown !== null
-                  ? `Recentering in ${countdown} seconds`
-                  : "Start 3-second recenter countdown"
-              }
-              aria-live="assertive"
-            >
-              {countdown !== null ? (
-                <>
-                  <span className="text-2xl font-mono" aria-hidden="true">
-                    ⏳
-                  </span>
-                  <span className="font-mono text-2xl font-bold">
-                    {countdown}.. انظر لمنتصف شاشة اللابتوب
-                  </span>
-                </>
-              ) : recenterFeedback ? (
-                <>
-                  <span className="text-2xl" aria-hidden="true">
-                    ✓
-                  </span>
-                  <span>تم ضبط المركز بنجاح! / Recentered</span>
-                </>
-              ) : (
-                <>
-                  <span className="text-2xl" aria-hidden="true">
-                    🎯
-                  </span>
-                  <span>Recenter / ضبط المركز (عد 3 ثوانٍ)</span>
-                </>
-              )}
-            </button>
-          </div>
-
-          {/* NON-LINEAR PRECISION CURVE TOGGLE (High Contrast Accessible Switch) */}
-          <div className="p-6 rounded-xl bg-zinc-900 border border-zinc-700 flex flex-col gap-3">
-            <div className="flex items-center justify-between border-b border-zinc-700 pb-2">
-              <span className="text-xl font-bold text-zinc-50">
-                وضع الدقة / Precision Curve
-              </span>
-              <span
-                className={`px-3 py-1 rounded text-sm font-bold font-mono border ${
-                  precisionMode
-                    ? "bg-teal-950 text-teal-300 border-teal-600"
-                    : "bg-zinc-800 text-zinc-300 border-zinc-600"
+              onClick={handleRecenter}
+              className={`w-full min-h-16 px-6 py-4 rounded-xl font-bold text-xl flex items-center justify-center gap-3 border-2 transition-colors duration-150 focus-visible:outline-none focus-visible:ring-4 focus-visible:ring-amber-400 focus-visible:ring-offset-2 focus-visible:ring-offset-zinc-950 ${recenterFeedback
+                  ? 'bg-green-600 text-white border-green-300'
+                  : 'bg-amber-600 hover:bg-amber-500 text-white border-amber-300'
                 }`}
-              >
-                {precisionMode ? "[●] مفعّل (1.35x)" : "[○] معطّل (خطي)"}
-              </span>
-            </div>
-            <p className="text-base text-zinc-300 leading-relaxed">
-              منحنى تسارع غير خطي يجعل الحركة حول المركز دقيقة وبطيئة جداً
-              لاصطياد الأزرار وعلامات التبويب الصغيرة (Tabs وزر X)، مع تسارع
-              تلقائي عند أطراف الشاشة.
-            </p>
-            <button
-              type="button"
-              onClick={() => setPrecisionMode((prev) => !prev)}
-              className={`w-full min-h-16 px-6 py-4 rounded-xl font-bold text-xl flex items-center justify-center gap-3 border-2 transition-colors duration-150 focus-visible:outline-none focus-visible:ring-4 focus-visible:ring-amber-400 focus-visible:ring-offset-2 focus-visible:ring-offset-zinc-950 ${
-                precisionMode
-                  ? "bg-teal-600 hover:bg-teal-500 text-white border-teal-300"
-                  : "bg-zinc-800 hover:bg-zinc-700 text-zinc-200 border-zinc-600"
-              }`}
-              aria-pressed={precisionMode}
-              aria-label="Toggle non-linear precision curve mode"
+              aria-label="Recenter current nose position as screen center"
             >
               <span className="text-2xl" aria-hidden="true">
-                {precisionMode ? "🎯" : "📐"}
+                🎯
               </span>
               <span>
-                {precisionMode
-                  ? "وضع الدقة مفعّل (Non-linear 1.35x)"
-                  : "وضع الدقة معطّل (حركة خطية مباشرة)"}
+                {recenterFeedback
+                  ? 'تم ضبط المركز بنجاح! / Recentered'
+                  : 'Recenter / ضبط المركز'}
               </span>
             </button>
           </div>
 
-          {/* Independent X & Y Sensitivity Controls */}
-          <div className="p-6 rounded-xl bg-zinc-900 border border-zinc-700 flex flex-col gap-5">
-            <h2 className="text-xl font-bold text-zinc-50 border-b border-zinc-700 pb-2">
-              الحساسية المستقلة للمحاور / Independent Sensitivity
-            </h2>
-
-            {/* X Sensitivity Slider */}
-            <div className="flex flex-col gap-3">
-              <div className="flex items-center justify-between">
-                <label
-                  htmlFor="sensitivity-x-slider"
-                  className="text-lg font-bold text-zinc-100"
-                >
-                  حساسية المحور الأفقي (X)
-                </label>
-                <span className="font-mono text-xl font-bold text-teal-400 px-3 py-0.5 rounded bg-zinc-950 border border-zinc-800">
-                  {sensitivityX.toFixed(1)}x
-                </span>
-              </div>
-              <p className="text-sm text-zinc-300">
-                تحكم مريح لليسار واليمين (الافتراضي 1.8x).
-              </p>
-              <input
-                id="sensitivity-x-slider"
-                type="range"
-                min="0.5"
-                max="5.0"
-                step="0.1"
-                value={sensitivityX}
-                onChange={(e) => changeSensitivityX(parseFloat(e.target.value))}
-                className="w-full h-4 bg-zinc-950 border border-zinc-700 rounded-lg cursor-pointer accent-teal-500 focus-visible:outline-none focus-visible:ring-4 focus-visible:ring-amber-400 focus-visible:ring-offset-2 focus-visible:ring-offset-zinc-950"
-                aria-valuemin={0.5}
-                aria-valuemax={5.0}
-                aria-valuenow={sensitivityX}
-                aria-valuetext={`Horizontal sensitivity ${sensitivityX.toFixed(1)}`}
-              />
-              <div className="grid grid-cols-2 gap-3 pt-1">
-                <button
-                  type="button"
-                  onClick={() => changeSensitivityX(sensitivityX - 0.2)}
-                  disabled={sensitivityX <= 0.5}
-                  className="min-h-14 px-3 py-2 rounded-lg bg-zinc-950 border border-zinc-700 hover:border-zinc-500 disabled:opacity-40 font-bold text-base text-zinc-100 flex items-center justify-center gap-1.5 focus-visible:outline-none focus-visible:ring-4 focus-visible:ring-amber-400 focus-visible:ring-offset-2 focus-visible:ring-offset-zinc-950 transition-colors duration-150"
-                  aria-label="Decrease horizontal sensitivity X by 0.2"
-                >
-                  <span className="text-xl">−</span>
-                  <span>تقليل X (-0.2)</span>
-                </button>
-                <button
-                  type="button"
-                  onClick={() => changeSensitivityX(sensitivityX + 0.2)}
-                  disabled={sensitivityX >= 5.0}
-                  className="min-h-14 px-3 py-2 rounded-lg bg-zinc-950 border border-zinc-700 hover:border-zinc-500 disabled:opacity-40 font-bold text-base text-zinc-100 flex items-center justify-center gap-1.5 focus-visible:outline-none focus-visible:ring-4 focus-visible:ring-amber-400 focus-visible:ring-offset-2 focus-visible:ring-offset-zinc-950 transition-colors duration-150"
-                  aria-label="Increase horizontal sensitivity X by 0.2"
-                >
-                  <span className="text-xl">+</span>
-                  <span>زيادة X (+0.2)</span>
-                </button>
-              </div>
-            </div>
-
-            {/* Y Sensitivity Slider */}
-            <div className="flex flex-col gap-3 pt-4 border-t border-zinc-800">
-              <div className="flex items-center justify-between">
-                <label
-                  htmlFor="sensitivity-y-slider"
-                  className="text-lg font-bold text-zinc-100"
-                >
-                  حساسية المحور الرأسي (Y)
-                </label>
-                <span className="font-mono text-xl font-bold text-amber-400 px-3 py-0.5 rounded bg-zinc-950 border border-zinc-800">
-                  {sensitivityY.toFixed(1)}x
-                </span>
-              </div>
-              <p className="text-sm text-zinc-300">
-                حساسية أعلى للوصول لأعلى وأسفل الشاشة بسهولة بدون إجهاد الرقبة
-                (الافتراضي 3.5x).
-              </p>
-              <input
-                id="sensitivity-y-slider"
-                type="range"
-                min="0.5"
-                max="6.0"
-                step="0.1"
-                value={sensitivityY}
-                onChange={(e) => changeSensitivityY(parseFloat(e.target.value))}
-                className="w-full h-4 bg-zinc-950 border border-zinc-700 rounded-lg cursor-pointer accent-amber-500 focus-visible:outline-none focus-visible:ring-4 focus-visible:ring-amber-400 focus-visible:ring-offset-2 focus-visible:ring-offset-zinc-950"
-                aria-valuemin={0.5}
-                aria-valuemax={6.0}
-                aria-valuenow={sensitivityY}
-                aria-valuetext={`Vertical sensitivity ${sensitivityY.toFixed(1)}`}
-              />
-              <div className="grid grid-cols-2 gap-3 pt-1">
-                <button
-                  type="button"
-                  onClick={() => changeSensitivityY(sensitivityY - 0.2)}
-                  disabled={sensitivityY <= 0.5}
-                  className="min-h-14 px-3 py-2 rounded-lg bg-zinc-950 border border-zinc-700 hover:border-zinc-500 disabled:opacity-40 font-bold text-base text-zinc-100 flex items-center justify-center gap-1.5 focus-visible:outline-none focus-visible:ring-4 focus-visible:ring-amber-400 focus-visible:ring-offset-2 focus-visible:ring-offset-zinc-950 transition-colors duration-150"
-                  aria-label="Decrease vertical sensitivity Y by 0.2"
-                >
-                  <span className="text-xl">−</span>
-                  <span>تقليل Y (-0.2)</span>
-                </button>
-                <button
-                  type="button"
-                  onClick={() => changeSensitivityY(sensitivityY + 0.2)}
-                  disabled={sensitivityY >= 6.0}
-                  className="min-h-14 px-3 py-2 rounded-lg bg-zinc-950 border border-zinc-700 hover:border-zinc-500 disabled:opacity-40 font-bold text-base text-zinc-100 flex items-center justify-center gap-1.5 focus-visible:outline-none focus-visible:ring-4 focus-visible:ring-amber-400 focus-visible:ring-offset-2 focus-visible:ring-offset-zinc-950 transition-colors duration-150"
-                  aria-label="Increase vertical sensitivity Y by 0.2"
-                >
-                  <span className="text-xl">+</span>
-                  <span>زيادة Y (+0.2)</span>
-                </button>
-              </div>
-            </div>
-          </div>
-
-          {/* Smoothing and Stability Control */}
+          {/* Sensitivity Slider Control (1.0 to 5.0 in steps of 0.5) */}
           <div className="p-6 rounded-xl bg-zinc-900 border border-zinc-700 flex flex-col gap-4">
             <div className="flex items-center justify-between border-b border-zinc-700 pb-2">
               <label
-                htmlFor="smoothing-slider"
-                className="text-lg font-bold text-zinc-100"
+                htmlFor="sensitivity-slider"
+                className="text-xl font-bold text-zinc-50"
               >
-                تنعيم الحركة (Smoothing EMA)
+                التحكم في الحساسية / Sensitivity
               </label>
-              <span className="font-mono text-xl font-bold text-teal-400 px-3 py-0.5 rounded bg-zinc-950 border border-zinc-800">
-                {(smoothing * 100).toFixed(0)}%
+              <span className="font-mono text-2xl font-bold text-teal-400 px-3 py-1 rounded bg-zinc-950 border border-zinc-800">
+                {sensitivity.toFixed(1)}x
               </span>
             </div>
 
-            <p className="text-sm text-zinc-300">
-              النعومة. القيمة الافتراضية 65% توفر استجابة فورية بدون بطء أو
-              عومان (المدى: 50% إلى 92%).
+            <p className="text-base text-zinc-300">
+              كلما زادت الحساسية، احتجت لحركة رأس أصغر للوصول لأطراف الشاشة.
             </p>
 
-            <input
-              id="smoothing-slider"
-              type="range"
-              min="0.50"
-              max="0.92"
-              step="0.02"
-              value={smoothing}
-              onChange={(e) => changeSmoothing(parseFloat(e.target.value))}
-              className="w-full h-4 bg-zinc-950 border border-zinc-700 rounded-lg cursor-pointer accent-teal-500 focus-visible:outline-none focus-visible:ring-4 focus-visible:ring-amber-400 focus-visible:ring-offset-2 focus-visible:ring-offset-zinc-950"
-              aria-valuemin={0.5}
-              aria-valuemax={0.92}
-              aria-valuenow={smoothing}
-              aria-valuetext={`Smoothing factor ${(smoothing * 100).toFixed(0)} percent`}
-            />
+            <div className="flex flex-col gap-3">
+              <input
+                id="sensitivity-slider"
+                type="range"
+                min="1.0"
+                max="5.0"
+                step="0.5"
+                value={sensitivity}
+                onChange={(e) => changeSensitivity(parseFloat(e.target.value))}
+                className="w-full h-4 bg-zinc-950 border border-zinc-700 rounded-lg cursor-pointer accent-teal-500 focus-visible:outline-none focus-visible:ring-4 focus-visible:ring-amber-400 focus-visible:ring-offset-2 focus-visible:ring-offset-zinc-950"
+                aria-valuemin={1.0}
+                aria-valuemax={5.0}
+                aria-valuenow={sensitivity}
+                aria-valuetext={`${sensitivity.toFixed(1)} times sensitivity`}
+              />
 
-            <div className="flex justify-between text-xs font-mono text-zinc-400">
-              <span>50% (فوري جداً)</span>
-              <span>65% (افتراضي رشيق)</span>
-              <span>92% (أقصى تنعيم)</span>
+              <div className="flex justify-between text-sm font-mono text-zinc-400">
+                <span>1.0x (أوسع حركة)</span>
+                <span>2.5x (افتراضي متوازن)</span>
+                <span>5.0x (أدنى حركة)</span>
+              </div>
             </div>
 
-            {/* Dead Zone Indicator Callout */}
-            <div className="p-3 rounded-lg bg-zinc-950 border border-zinc-800 flex items-center justify-between text-sm">
-              <span className="text-zinc-300 font-semibold">
-                منطقة الثبات (Dead Zone):
-              </span>
-              <span className="font-mono text-teal-400 font-bold">
-                0.004 (فلترة الرعشة الخفيفة)
-              </span>
+            <div className="grid grid-cols-2 gap-3 pt-2">
+              <button
+                type="button"
+                onClick={() => changeSensitivity(sensitivity - 0.5)}
+                disabled={sensitivity <= 1.0}
+                className="min-h-14 px-4 py-2 rounded-lg bg-zinc-950 border border-zinc-700 hover:border-zinc-500 disabled:opacity-40 disabled:cursor-not-allowed font-bold text-lg text-zinc-100 flex items-center justify-center gap-2 focus-visible:outline-none focus-visible:ring-4 focus-visible:ring-amber-400 focus-visible:ring-offset-2 focus-visible:ring-offset-zinc-950 transition-colors duration-150"
+                aria-label="Decrease sensitivity by 0.5"
+              >
+                <span className="text-2xl" aria-hidden="true">
+                  −
+                </span>
+                <span>تقليل الحساسية (-0.5)</span>
+              </button>
+
+              <button
+                type="button"
+                onClick={() => changeSensitivity(sensitivity + 0.5)}
+                disabled={sensitivity >= 5.0}
+                className="min-h-14 px-4 py-2 rounded-lg bg-zinc-950 border border-zinc-700 hover:border-zinc-500 disabled:opacity-40 disabled:cursor-not-allowed font-bold text-lg text-zinc-100 flex items-center justify-center gap-2 focus-visible:outline-none focus-visible:ring-4 focus-visible:ring-amber-400 focus-visible:ring-offset-2 focus-visible:ring-offset-zinc-950 transition-colors duration-150"
+                aria-label="Increase sensitivity by 0.5"
+              >
+                <span className="text-2xl" aria-hidden="true">
+                  +
+                </span>
+                <span>زيادة الحساسية (+0.5)</span>
+              </button>
             </div>
           </div>
 
@@ -870,36 +662,53 @@ export default function AssistiveController() {
               </div>
             </div>
 
-            {/* Smoothing, Sensitivities, Throttle and Precision Details */}
+            {/* Face Expressions Live Blendshapes */}
+            <div className="p-4 rounded-lg bg-zinc-950 border border-zinc-800 flex flex-col gap-2 font-mono text-xs">
+              <span className="text-sm font-bold text-zinc-200 block mb-1">
+                تعبيرات الوجه النشطة / Live Blendshapes:
+              </span>
+              <div className="flex justify-between items-center">
+                <span>Brow Up (Left Click &gt;0.45):</span>
+                <span
+                  className={`font-bold ${blendshapesData.browInnerUp > 0.45
+                      ? 'text-teal-400'
+                      : blendshapesData.browInnerUp > 0.25
+                        ? 'text-amber-400'
+                        : 'text-zinc-400'
+                    }`}
+                >
+                  {(blendshapesData.browInnerUp * 100).toFixed(0)}%
+                </span>
+              </div>
+              <div className="flex justify-between items-center">
+                <span>Jaw Side (Right Click &gt;0.40):</span>
+                <span
+                  className={`font-bold ${Math.max(blendshapesData.jawRight, blendshapesData.jawLeft) > 0.40
+                      ? 'text-blue-400'
+                      : Math.max(blendshapesData.jawRight, blendshapesData.jawLeft) > 0.25
+                        ? 'text-amber-400'
+                        : 'text-zinc-400'
+                    }`}
+                >
+                  {(Math.max(blendshapesData.jawRight, blendshapesData.jawLeft) * 100).toFixed(0)}%
+                </span>
+              </div>
+              <div className="flex justify-between items-center">
+                <span>Jaw Open (Scroll Mode &gt;0.45):</span>
+                <span
+                  className={`font-bold ${blendshapesData.jawOpen > 0.45 ? 'text-purple-400' : 'text-zinc-400'
+                    }`}
+                >
+                  {(blendshapesData.jawOpen * 100).toFixed(0)}%
+                </span>
+              </div>
+            </div>
+
+            {/* Smoothing and Throttle Details */}
             <div className="flex flex-col gap-1.5 text-base text-zinc-300 pt-2 border-t border-zinc-800 font-mono text-sm">
               <div className="flex justify-between">
-                <span>Curve Mode:</span>
-                <span
-                  className={
-                    precisionMode ? "text-teal-400 font-bold" : "text-zinc-400"
-                  }
-                >
-                  {precisionMode
-                    ? "Non-linear (Power 1.35)"
-                    : "Linear (Standard)"}
-                </span>
-              </div>
-              <div className="flex justify-between">
                 <span>Filter:</span>
-                <span className="text-zinc-100 font-bold">
-                  EMA {(smoothing * 100).toFixed(0)}% /{" "}
-                  {((1 - smoothing) * 100).toFixed(0)}%
-                </span>
-              </div>
-              <div className="flex justify-between">
-                <span>Dead Zone:</span>
-                <span className="text-zinc-100 font-bold">{DEAD_ZONE}</span>
-              </div>
-              <div className="flex justify-between">
-                <span>Sens (X / Y):</span>
-                <span className="text-teal-400 font-bold">
-                  {`${sensitivityX.toFixed(1)}x / ${sensitivityY.toFixed(1)}x`}
-                </span>
+                <span className="text-zinc-100 font-bold">EMA Smoothing (70% / 30%)</span>
               </div>
               <div className="flex justify-between">
                 <span>Active Center:</span>
@@ -915,7 +724,7 @@ export default function AssistiveController() {
               </div>
               <div className="flex justify-between">
                 <span>Throttle Rate:</span>
-                <span className="text-teal-400 font-bold">20 ms (50 Hz)</span>
+                <span className="text-zinc-100 font-bold">50 ms (20 Hz)</span>
               </div>
               <div className="flex justify-between">
                 <span>Packets Sent:</span>
@@ -923,10 +732,7 @@ export default function AssistiveController() {
               </div>
               <div className="flex justify-between">
                 <span>Server Endpoint:</span>
-                <span
-                  className="text-zinc-400 text-xs truncate max-w-[200px]"
-                  title={SERVER_URL}
-                >
+                <span className="text-zinc-400 text-xs truncate max-w-[200px]" title={SERVER_URL}>
                   {SERVER_URL}
                 </span>
               </div>
@@ -975,49 +781,59 @@ export default function AssistiveController() {
               </div>
             )}
 
-            {/* Badges on video container */}
+            {/* TOP BAR BADGES: Gesture Status Badge & Face Locked Badge */}
+            <div className="absolute top-3 left-3 right-3 z-20 flex items-center justify-between pointer-events-none">
+              {/* Dynamic Gesture / Status Badge */}
+              <div
+                className={`px-3.5 py-1.5 rounded-lg text-sm sm:text-base font-bold flex items-center gap-2 shadow-sm ${getBadgeStyle()}`}
+                role="status"
+                aria-live="polite"
+              >
+                <span aria-hidden="true" className="text-base">
+                  {getBadgeIcon()}
+                </span>
+                <span>{gestureStatus}</span>
+              </div>
+
+                    < div
+                className={`px-3 py-1.5 rounded-lg border text-sm font-bold flex items-center gap-2 ${faceDetected
+                      ? 'bg-zinc-900/90 border-green-500 text-green-400'
+                      : 'bg-zinc-900/90 border-amber-500 text-amber-300'
+                    }`}
+                >
+                  <span aria-hidden="true">{faceDetected ? '●' : '■'}</span>
+                  <span>{faceDetected ? 'Face Locked' : 'Searching Face'}</span>
+              </div>
+            </div>
+
+            {/* Badges on bottom of video container */}
             <div className="absolute bottom-3 left-3 z-20 flex gap-2">
               <span className="px-3 py-1.5 rounded-md bg-zinc-900/90 border border-zinc-700 text-zinc-200 text-sm font-semibold">
                 مرآة الكاميرا الأمامية
               </span>
               <span className="px-3 py-1.5 rounded-md bg-zinc-900/90 border border-zinc-700 text-amber-300 text-sm font-semibold">
-                المستطيل = نطاق التحكم النشط
-              </span>
-            </div>
-
-            {/* Detection status badge */}
-            <div className="absolute top-3 right-3 z-20">
-              <span
-                className={`px-3 py-1.5 rounded-md border text-sm font-bold flex items-center gap-2 ${
-                  faceDetected
-                    ? "bg-zinc-900/90 border-green-500 text-green-400"
-                    : "bg-zinc-900/90 border-amber-500 text-amber-300"
-                }`}
-              >
-                <span aria-hidden="true">{faceDetected ? "●" : "■"}</span>
-                <span>{faceDetected ? "Face Locked" : "Searching Face"}</span>
+                المستطيل المنقط = نطاق التحكم النشط
               </span>
             </div>
           </div>
 
-          {/* Utilitarian Instructions Callout */}
+          {/* Utilitarian Instructions Callout (Face Gestures) */}
           <div className="p-4 rounded-xl bg-zinc-900 border border-zinc-700 text-zinc-300 text-base leading-relaxed space-y-2">
             <p className="font-bold text-zinc-50">
-              (Precision Mode):
+              💡 إرشادات التحكم بالإيماءات وتعبيرات الوجه:
             </p>
             <ul className="list-disc list-inside space-y-1.5 pr-2">
               <li>
-                <strong>معدل 50 Hz (20ms):</strong> يرسل حركة الماوس 50 مرة في
-                الثانية لضمان انسيابية تامة وسرعة استجابة بدون تقطيع.
+                <strong>Left Click (نقرة يسار):</strong> ارفع حاجبيك لأعلى (Brow Up) للضغط كليك يسار.
               </li>
               <li>
-                <strong>منحنى الدقة غير الخطي (1.35x):</strong> يجعل الحركات
-                البسيطة حول المركز بطيئة جداً مما يتيح لك الوقوف بدقة وسهولة على
-                علامات التبويب (Tabs)، والروابط، وزر الإغلاق (X).
+                <strong>Right Click (نقرة يمين):</strong> حرّك فكك للجانب الأيمن أو الأيسر (Jaw Side) للضغط كليك يمين.
               </li>
               <li>
-                <strong>التنعيم الرشيق (EMA 65%):</strong> يقضي على إحساس
-                التأخير (العومان) ويمنحك تحكماً فورياً ومباشراً ومستقراً.
+                <strong>Scroll Mode (وضع التمرير):</strong> افتح فمك (Jaw Open) وحرّك رأسك لأعلى أو لأسفل للتمرير بدلاً من تحريك المؤشر.
+              </li>
+              <li>
+                <strong>Freeze-on-Gesture (تثبيت المؤشر):</strong> عند بدء أي إيماءة ضغط، يتجمد المؤشر تلقائياً لمنع أي انزلاق غير مرغوب أثناء الضغط.
               </li>
             </ul>
           </div>

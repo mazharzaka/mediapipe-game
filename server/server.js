@@ -1,6 +1,6 @@
+require("dotenv").config();
 const express = require("express");
 const http = require("http");
-const os = require("os");
 const cors = require("cors");
 const { Server } = require("socket.io");
 const { mouse, Point, screen } = require("@nut-tree/nut-js");
@@ -9,40 +9,13 @@ const { mouse, Point, screen } = require("@nut-tree/nut-js");
 mouse.config.autoDelayMs = 0;
 
 const PORT = process.env.PORT || 3000;
-
-// Extract local WiFi / Ethernet IPv4 address for mobile QR Code access
-function getLocalNetworkIp() {
-  const interfaces = os.networkInterfaces();
-  let fallbackIp = null;
-
-  for (const name of Object.keys(interfaces)) {
-    const isWifi = /wi-?fi|wlan/i.test(name);
-    for (const iface of interfaces[name]) {
-      const isIPv4 = iface.family === "IPv4" || iface.family === 4;
-      if (isIPv4 && !iface.internal) {
-        if (isWifi) {
-          return iface.address;
-        }
-        if (!fallbackIp) {
-          fallbackIp = iface.address;
-        }
-      }
-    }
-  }
-
-  return fallbackIp || "192.168.100";
-}
+const CORS_ORIGIN = process.env.CORS_ORIGIN || "*";
 
 const app = express();
-app.use(cors({ origin: "*" }));
-
-// API Endpoint to get local network IP
-app.get("/api/network-info", (req, res) => {
-  res.json({ ip: getLocalNetworkIp() });
-});
+app.use(cors({ origin: CORS_ORIGIN }));
 
 const server = http.createServer(app);
-const io = new Server(server, { cors: { origin: "*" } });
+const io = new Server(server, { cors: { origin: CORS_ORIGIN } });
 
 io.on("connection", (socket) => {
   console.log(`Client connected: ${socket.id}`);
@@ -61,6 +34,34 @@ io.on("connection", (socket) => {
       await mouse.setPosition(new Point(targetX, targetY));
     } catch (err) {
       console.error("Error in assistiveMove:", err);
+    }
+  });
+
+  socket.on("mouse_click", async ({ button }) => {
+    try {
+      if (button === "left") {
+        await mouse.leftClick();
+      } else if (button === "right") {
+        await mouse.rightClick();
+      }
+    } catch (err) {
+      console.error("Error in mouse_click:", err);
+    }
+  });
+
+  socket.on("mouse_scroll", async ({ direction, amount, dy }) => {
+    try {
+      const steps =
+        typeof amount === "number" && amount > 0
+          ? Math.min(Math.round(amount), 10)
+          : 2;
+      if (direction === "up" || (typeof dy === "number" && dy < 0)) {
+        await mouse.scrollUp(steps);
+      } else if (direction === "down" || (typeof dy === "number" && dy > 0)) {
+        await mouse.scrollDown(steps);
+      }
+    } catch (err) {
+      console.error("Error in mouse_scroll:", err);
     }
   });
 
