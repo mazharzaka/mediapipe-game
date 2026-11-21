@@ -1,3 +1,4 @@
+require('dotenv').config();
 const express = require('express');
 const http = require('http');
 const cors = require('cors');
@@ -7,13 +8,14 @@ const { mouse, Point, screen } = require('@nut-tree/nut-js');
 // Optimize responsiveness for real-time tracking
 mouse.config.autoDelayMs = 0;
 
-const PORT = 3000;
+const PORT = process.env.PORT || 3000;
+const CORS_ORIGIN = process.env.CORS_ORIGIN || '*';
 
 const app = express();
-app.use(cors({ origin: '*' }));
+app.use(cors({ origin: CORS_ORIGIN }));
 
 const server = http.createServer(app);
-const io = new Server(server, { cors: { origin: '*' } });
+const io = new Server(server, { cors: { origin: CORS_ORIGIN } });
 
 io.on('connection', (socket) => {
   console.log(`Client connected: ${socket.id}`);
@@ -32,6 +34,31 @@ io.on('connection', (socket) => {
       await mouse.setPosition(new Point(targetX, targetY));
     } catch (err) {
       console.error('Error in assistiveMove:', err);
+    }
+  });
+
+  socket.on('mouse_click', async ({ button }) => {
+    try {
+      if (button === 'left') {
+        await mouse.leftClick();
+      } else if (button === 'right') {
+        await mouse.rightClick();
+      }
+    } catch (err) {
+      console.error('Error in mouse_click:', err);
+    }
+  });
+
+  socket.on('mouse_scroll', async ({ direction, amount, dy }) => {
+    try {
+      const steps = typeof amount === 'number' && amount > 0 ? Math.min(Math.round(amount), 10) : 2;
+      if (direction === 'up' || (typeof dy === 'number' && dy < 0)) {
+        await mouse.scrollUp(steps);
+      } else if (direction === 'down' || (typeof dy === 'number' && dy > 0)) {
+        await mouse.scrollDown(steps);
+      }
+    } catch (err) {
+      console.error('Error in mouse_scroll:', err);
     }
   });
 
