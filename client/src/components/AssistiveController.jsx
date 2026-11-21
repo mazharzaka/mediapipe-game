@@ -10,9 +10,9 @@ const MODEL_URL =
 // Landmark index 1 is canonical Nose Tip in MediaPipe Face Mesh
 const NOSE_TIP_INDEX = 1;
 const THROTTLE_MS = 50; // Strict 50ms throttling (20 Hz) for mouse move
-const CLICK_COOLDOWN_MS = 600; // 600ms cooldown for clicks
 const SCROLL_THROTTLE_MS = 80; // 80ms throttle for scroll events
 const SCROLL_DEADZONE = 0.005; // Vertical deadzone for head tilt scroll
+const MAX_FREEZE_MS = 400; // Max freeze duration (400ms) to prevent mouse hang
 
 export default function AssistiveController() {
   const videoRef = useRef(null);
@@ -56,14 +56,23 @@ export default function AssistiveController() {
     jawOpen: 0,
   });
 
-  // Refs for tracking loop (avoids stale closures)
-  const lastEmitTimeRef = useRef(0);
-  const lastClickTimeRef = useRef(0);
+  // Edge Trigger & Hysteresis State Refs
+  const leftClickArmedRef = useRef(true);
+  const rightClickArmedRef = useRef(true);
+
+  // Freeze-on-Gesture timer
+  const freezeStartTimeRef = useRef(0);
+
+  // Scroll Mode tracking refs
   const lastScrollTimeRef = useRef(0);
   const lastScrollNoseYRef = useRef(null);
   const isScrollModeRef = useRef(false);
+
+  // General loop tracking refs
+  const lastEmitTimeRef = useRef(0);
   const prevGestureStatusRef = useRef('Standby');
   const clickFeedbackUntilRef = useRef(0);
+  const lastClickTypeRef = useRef('Left Click');
   const lastTelemetryUpdateRef = useRef(0);
 
   // Synchronize state to refs for animation loop
@@ -126,7 +135,7 @@ export default function AssistiveController() {
           }
         }
 
-        // 1. Extract Blendshape expression scores
+        // 1. Extract Blendshape scores
         let browInnerUp = 0;
         let jawRight = 0;
         let jawLeft = 0;
@@ -142,7 +151,7 @@ export default function AssistiveController() {
           }
         }
 
-        // Throttle telemetry update to UI for 60fps smoothness
+        // Throttle telemetry update to React UI (every 100ms) for high performance
         if (timestamp - lastTelemetryUpdateRef.current >= 100) {
           lastTelemetryUpdateRef.current = timestamp;
           setBlendshapesData({ browInnerUp, jawRight, jawLeft, jawOpen });
@@ -226,172 +235,209 @@ export default function AssistiveController() {
               ctx.moveTo(nosePxX - 22, nosePxY);
               ctx.lineTo(nosePxX + 22, nosePxY);
               ctx.moveTo(nosePxX, nosePxY - 22);
-              ctx.lineTo(nosePxX, nosePxY + 22);
+              ctx.lineTo(nosePxX + 22, nosePxY);
               ctx.stroke();
             }
           }
 
-              // 2. Gesture Evaluation & Freeze-on-Gesture Logic
-              const maxJawSide = Math.max(jawRight, jawLeft);
-              const isScrollMode = jawOpen > 0.45;
-              const isFrozen = browInnerUp > 0.25 || maxJawSide > 0.25;
+          // 2. Gesture Evaluation with Mutual Exclusion, Edge Trigger & Max Freeze
+          const maxJawSide = Math.max(jawRight, jawLeft);
+          const isScrollMode = jawOpen > 0.45;
+          let currentStatus = isTrackingRef.current ? 'Tracking Active' : 'Standby';
 
-              let currentStatus = isTrackingRef.current ? 'Tracking Active' : 'Standby';
+          // --- MUTUAL EXCLUSION: Scroll Mode takes precedence ---
+          if (isScrollMode) {
+            // When jawOpen > 0.45, clicks are completely disabled to avoid accidental triggers
+            freezeStartTimeRef.current = 0; // Release any active freeze
 
-              // A. Trigger Click Gestures (with 600ms cooldown)
-              if (browInnerUp > 0.45 && timestamp - lastClickTimeRef.current >= CLICK_COOLDOWN_MS) {
-                lastClickTimeRef.current = timestamp;
-                clickFeedbackUntilRef.current = timestamp + 500;
+            if (!isScrollModeRef.current || lastScrollNoseYRef.current === null) {
+              lastScrollNoseYRef.current = noseY;
+              isScrollModeRef.current = true;
+            }
+
+            const dy = noseY - lastScrollNoseYRef.current;
+            if (timestamp - lastScrollTimeRef.current >= SCROLL_THROTTLE_MS) {
+              if (dy < -SCROLL_DEADZONE) {
+                // Head tilted upward -> Scroll Up
+                console.log('[AssistiveController] Scroll UP, dy =', dy.toFixed(4));
                 if (isTrackingRef.current) {
-                  socket.emit('mouse_click', { button: 'left' });
+                  socket.emit('mouse_scroll', { direction: 'up', dy, amount: 150 });
                 }
-              } else if (
-                maxJawSide > 0.40 &&
-                timestamp - lastClickTimeRef.current >= CLICK_COOLDOWN_MS
-              ) {
-                lastClickTimeRef.current = timestamp;
-                clickFeedbackUntilRef.current = timestamp + 500;
+                lastScrollTimeRef.current = timestamp;
+                lastScrollNoseYRef.current = noseY;
+              } else if (dy > SCROLL_DEADZONE) {
+                // Head tilted downward -> Scroll Down
+                console.log('[AssistiveController] Scroll DOWN, dy =', dy.toFixed(4));
                 if (isTrackingRef.current) {
-                  socket.emit('mouse_click', { button: 'right' });
+                  socket.emit('mouse_scroll', { direction: 'down', dy, amount: 150 });
                 }
+                lastScrollTimeRef.current = timestamp;
+                lastScrollNoseYRef.current = noseY;
               }
+            }
 
-              // B. Scroll Mode (jawOpen > 0.45)
-              if (isScrollMode) {
-                if (!isScrollModeRef.current || lastScrollNoseYRef.current === null) {
-                  lastScrollNoseYRef.current = noseY;
-                  isScrollModeRef.current = true;
-                }
+            currentStatus = 'Scroll Mode';
+          } else {
+            // Not in scroll mode: reset scroll state
+            isScrollModeRef.current = false;
+            lastScrollNoseYRef.current = null;
 
-                const dy = noseY - lastScrollNoseYRef.current;
-                if (timestamp - lastScrollTimeRef.current >= SCROLL_THROTTLE_MS) {
-                  if (dy < -SCROLL_DEADZONE) {
-                    // Head tilted upward -> Scroll Up
-                    if (isTrackingRef.current) {
-                      socket.emit('mouse_scroll', { direction: 'up', dy, amount: 2 });
-                    }
-                    lastScrollTimeRef.current = timestamp;
-                    lastScrollNoseYRef.current = noseY;
-                  } else if (dy > SCROLL_DEADZONE) {
-                    // Head tilted downward -> Scroll Down
-                    if (isTrackingRef.current) {
-                      socket.emit('mouse_scroll', { direction: 'down', dy, amount: 2 });
-                    }
-                    lastScrollTimeRef.current = timestamp;
-                    lastScrollNoseYRef.current = noseY;
-                  }
-                }
+            // --- HYSTERESIS & EDGE TRIGGER FOR CLICKS ---
+            // 1. Re-arm triggers only after values drop below 0.20
+            if (browInnerUp < 0.20) {
+              leftClickArmedRef.current = true;
+            }
+            if (maxJawSide < 0.20) {
+              rightClickArmedRef.current = true;
+            }
 
-                currentStatus = 'Scroll Mode';
+            // 2. Fire single-shot edge trigger on threshold crossing
+            if (leftClickArmedRef.current && browInnerUp > 0.50) {
+              leftClickArmedRef.current = false; // Disarm until value falls below 0.20
+              clickFeedbackUntilRef.current = timestamp + 500;
+              lastClickTypeRef.current = 'Left Click';
+              console.log('[AssistiveController] Triggered Left Click (browInnerUp > 0.50)');
+              if (isTrackingRef.current) {
+                socket.emit('mouse_click', { button: 'left' });
+              }
+            } else if (rightClickArmedRef.current && maxJawSide > 0.45) {
+              rightClickArmedRef.current = false; // Disarm until value falls below 0.20
+              clickFeedbackUntilRef.current = timestamp + 500;
+              lastClickTypeRef.current = 'Right Click';
+              console.log('[AssistiveController] Triggered Right Click (maxJawSide > 0.45)');
+              if (isTrackingRef.current) {
+                socket.emit('mouse_click', { button: 'right' });
+              }
+            }
+
+            // --- FREEZE-ON-GESTURE WITH MAX TIMEOUT (400ms) ---
+            const inGestureZone = browInnerUp > 0.25 || maxJawSide > 0.25;
+            let isFrozen = false;
+
+            if (inGestureZone) {
+              if (freezeStartTimeRef.current === 0) {
+                freezeStartTimeRef.current = timestamp;
+              }
+              const freezeElapsed = timestamp - freezeStartTimeRef.current;
+              if (freezeElapsed <= MAX_FREEZE_MS) {
+                isFrozen = true;
               } else {
-                isScrollModeRef.current = false;
-                lastScrollNoseYRef.current = null;
-
-                // C. Mouse Cursor Movement with Freeze-on-Gesture
-                if (isFrozen) {
-                  // Cursor is anchored in place: do NOT emit movement to prevent drift
-                  currentStatus = 'Frozen';
-                } else {
-                  // Not frozen and not scrolling: update smoothed coordinates and emit
-                  smoothedPosRef.current = { x: finalX, y: finalY };
-                  setCoords({ x: finalX, y: finalY });
-
-                  if (isTrackingRef.current) {
-                    currentStatus = 'Tracking Active';
-                    if (timestamp - lastEmitTimeRef.current >= THROTTLE_MS) {
-                      lastEmitTimeRef.current = timestamp;
-                      socket.emit('assistiveMove', { x: finalX, y: finalY });
-                      setPacketsSent((prev) => prev + 1);
-                    }
-                  }
-                }
-              }
-
-              // Prioritize showing Click badge for 500ms after a click
-              if (timestamp < clickFeedbackUntilRef.current) {
-                currentStatus = browInnerUp > 0.45 ? 'Left Click' : 'Right Click';
-              }
-
-              if (currentStatus !== prevGestureStatusRef.current) {
-                prevGestureStatusRef.current = currentStatus;
-                setGestureStatus(currentStatus);
+                // Max freeze time exceeded -> auto unfreeze to prevent cursor hang
+                isFrozen = false;
               }
             } else {
-              setFaceDetected(false);
-              if (prevGestureStatusRef.current !== 'Standby') {
-                prevGestureStatusRef.current = 'Standby';
-                setGestureStatus('Standby');
+              // Reset freeze timer when gesture returns to rest
+              freezeStartTimeRef.current = 0;
+              isFrozen = false;
+            }
+
+            // --- MOUSE MOVEMENT DISPATCH ---
+            if (isFrozen) {
+              currentStatus = 'Frozen';
+              // Cursor is anchored in place: do NOT emit movement to prevent drift
+            } else {
+              smoothedPosRef.current = { x: finalX, y: finalY };
+              setCoords({ x: finalX, y: finalY });
+
+              if (isTrackingRef.current) {
+                currentStatus = 'Tracking Active';
+                if (timestamp - lastEmitTimeRef.current >= THROTTLE_MS) {
+                  lastEmitTimeRef.current = timestamp;
+                  socket.emit('assistiveMove', { x: finalX, y: finalY });
+                  setPacketsSent((prev) => prev + 1);
+                }
+              } else {
+                currentStatus = 'Standby';
               }
             }
           }
 
-          rafId = requestAnimationFrame(renderLoop);
-        };
-
-        const videoEl = videoRef.current;
-        (async () => {
-          try {
-            setModelStatus('Requesting camera access / جاري طلب إذن الكاميرا...');
-            stream = await navigator.mediaDevices.getUserMedia({
-              video: {
-                facingMode: 'user',
-                width: { ideal: 1280 },
-                height: { ideal: 720 },
-              },
-              audio: false,
-            });
-
-            if (cancelled) {
-              stream.getTracks().forEach((t) => t.stop());
-              return;
-            }
-
-            if (videoRef.current) {
-              videoRef.current.srcObject = stream;
-              await videoRef.current.play();
-            }
-
-            setModelStatus('Loading FaceLandmarker model / جاري تحميل نموذج التتبع...');
-            const visionFileset = await FilesetResolver.forVisionTasks(WASM_URL);
-            const lm = await FaceLandmarker.createFromOptions(visionFileset, {
-              baseOptions: {
-                modelAssetPath: MODEL_URL,
-                delegate: 'GPU',
-              },
-              outputFaceBlendshapes: true,
-              runningMode: 'VIDEO',
-              numFaces: 1,
-            });
-
-            if (cancelled) {
-              lm.close();
-              return;
-            }
-
-            landmarker = lm;
-            setIsModelReady(true);
-            setModelStatus('Ready. Keep your face in frame / جاهز. حافظ على وجهك داخل الإطار.');
-            renderLoop();
-          } catch (err) {
-            console.error('Assistive setup error:', err);
-            if (!cancelled) {
-              setModelStatus(`Error: ${err.message || 'Could not initialize camera/model'}`);
-            }
+          // Prioritize showing Click badge for 500ms after a click
+          if (timestamp < clickFeedbackUntilRef.current) {
+            currentStatus = lastClickTypeRef.current;
           }
-        })();
 
-        return () => {
-          cancelled = true;
-          cancelAnimationFrame(rafId);
-          if (stream) {
-            stream.getTracks().forEach((track) => track.stop());
+          if (currentStatus !== prevGestureStatusRef.current) {
+            prevGestureStatusRef.current = currentStatus;
+            setGestureStatus(currentStatus);
           }
-          if (videoEl) {
-            videoEl.srcObject = null;
+        } else {
+          setFaceDetected(false);
+          freezeStartTimeRef.current = 0;
+          if (prevGestureStatusRef.current !== 'Standby') {
+            prevGestureStatusRef.current = 'Standby';
+            setGestureStatus('Standby');
           }
-          landmarker?.close();
-        };
-      }, []);
+        }
+      }
+
+      rafId = requestAnimationFrame(renderLoop);
+    };
+
+    const videoEl = videoRef.current;
+    (async () => {
+      try {
+        setModelStatus('Requesting camera access / جاري طلب إذن الكاميرا...');
+        stream = await navigator.mediaDevices.getUserMedia({
+          video: {
+            facingMode: 'user',
+            width: { ideal: 1280 },
+            height: { ideal: 720 },
+          },
+          audio: false,
+        });
+
+        if (cancelled) {
+          stream.getTracks().forEach((t) => t.stop());
+          return;
+        }
+
+        if (videoRef.current) {
+          videoRef.current.srcObject = stream;
+          await videoRef.current.play();
+        }
+
+        setModelStatus('Loading FaceLandmarker model / جاري تحميل نموذج التتبع...');
+        const visionFileset = await FilesetResolver.forVisionTasks(WASM_URL);
+        const lm = await FaceLandmarker.createFromOptions(visionFileset, {
+          baseOptions: {
+            modelAssetPath: MODEL_URL,
+            delegate: 'GPU',
+          },
+          outputFaceBlendshapes: true,
+          runningMode: 'VIDEO',
+          numFaces: 1,
+        });
+
+        if (cancelled) {
+          lm.close();
+          return;
+        }
+
+        landmarker = lm;
+        setIsModelReady(true);
+        setModelStatus('Ready. Keep your face in frame / جاهز. حافظ على وجهك داخل الإطار.');
+        renderLoop();
+      } catch (err) {
+        console.error('Assistive setup error:', err);
+        if (!cancelled) {
+          setModelStatus(`Error: ${err.message || 'Could not initialize camera/model'}`);
+        }
+      }
+    })();
+
+    return () => {
+      cancelled = true;
+      cancelAnimationFrame(rafId);
+      if (stream) {
+        stream.getTracks().forEach((track) => track.stop());
+      }
+      if (videoEl) {
+        videoEl.srcObject = null;
+      }
+      landmarker?.close();
+    };
+  }, []);
 
   const toggleTracking = useCallback(() => {
     setIsTracking((prev) => !prev);
@@ -478,8 +524,9 @@ export default function AssistiveController() {
           aria-live="polite"
         >
           <span
-            className={`inline-block w-3.5 h-3.5 rounded-full ${socketConnected ? 'bg-green-500' : 'bg-red-500'
-              }`}
+            className={`inline-block w-3.5 h-3.5 rounded-full ${
+              socketConnected ? 'bg-green-500' : 'bg-red-500'
+            }`}
             aria-hidden="true"
           />
           <span className="text-base font-semibold text-zinc-200">
@@ -494,10 +541,11 @@ export default function AssistiveController() {
           type="button"
           onClick={toggleTracking}
           disabled={!isModelReady}
-          className={`w-full min-h-24 px-6 py-5 rounded-xl text-xl sm:text-2xl font-bold tracking-wide transition-colors duration-150 flex items-center justify-center gap-4 border-2 focus-visible:outline-none focus-visible:ring-4 focus-visible:ring-amber-400 focus-visible:ring-offset-4 focus-visible:ring-offset-zinc-950 disabled:opacity-50 disabled:cursor-not-allowed ${isTracking
+          className={`w-full min-h-24 px-6 py-5 rounded-xl text-xl sm:text-2xl font-bold tracking-wide transition-colors duration-150 flex items-center justify-center gap-4 border-2 focus-visible:outline-none focus-visible:ring-4 focus-visible:ring-amber-400 focus-visible:ring-offset-4 focus-visible:ring-offset-zinc-950 disabled:opacity-50 disabled:cursor-not-allowed ${
+            isTracking
               ? 'bg-red-600 hover:bg-red-500 text-white border-red-300 shadow-none'
               : 'bg-teal-600 hover:bg-teal-500 text-white border-teal-300 shadow-none'
-            }`}
+          }`}
           aria-pressed={isTracking}
           aria-label={
             isTracking
@@ -542,10 +590,11 @@ export default function AssistiveController() {
             <button
               type="button"
               onClick={handleRecenter}
-              className={`w-full min-h-16 px-6 py-4 rounded-xl font-bold text-xl flex items-center justify-center gap-3 border-2 transition-colors duration-150 focus-visible:outline-none focus-visible:ring-4 focus-visible:ring-amber-400 focus-visible:ring-offset-2 focus-visible:ring-offset-zinc-950 ${recenterFeedback
+              className={`w-full min-h-16 px-6 py-4 rounded-xl font-bold text-xl flex items-center justify-center gap-3 border-2 transition-colors duration-150 focus-visible:outline-none focus-visible:ring-4 focus-visible:ring-amber-400 focus-visible:ring-offset-2 focus-visible:ring-offset-zinc-950 ${
+                recenterFeedback
                   ? 'bg-green-600 text-white border-green-300'
                   : 'bg-amber-600 hover:bg-amber-500 text-white border-amber-300'
-                }`}
+              }`}
               aria-label="Recenter current nose position as screen center"
             >
               <span className="text-2xl" aria-hidden="true">
@@ -668,27 +717,29 @@ export default function AssistiveController() {
                 تعبيرات الوجه النشطة / Live Blendshapes:
               </span>
               <div className="flex justify-between items-center">
-                <span>Brow Up (Left Click &gt;0.45):</span>
+                <span>Brow Up (Left Click &gt;0.50, reset &lt;0.20):</span>
                 <span
-                  className={`font-bold ${blendshapesData.browInnerUp > 0.45
+                  className={`font-bold ${
+                    blendshapesData.browInnerUp > 0.50
                       ? 'text-teal-400'
                       : blendshapesData.browInnerUp > 0.25
-                        ? 'text-amber-400'
-                        : 'text-zinc-400'
-                    }`}
+                      ? 'text-amber-400'
+                      : 'text-zinc-400'
+                  }`}
                 >
                   {(blendshapesData.browInnerUp * 100).toFixed(0)}%
                 </span>
               </div>
               <div className="flex justify-between items-center">
-                <span>Jaw Side (Right Click &gt;0.40):</span>
+                <span>Jaw Side (Right Click &gt;0.45, reset &lt;0.20):</span>
                 <span
-                  className={`font-bold ${Math.max(blendshapesData.jawRight, blendshapesData.jawLeft) > 0.40
+                  className={`font-bold ${
+                    Math.max(blendshapesData.jawRight, blendshapesData.jawLeft) > 0.45
                       ? 'text-blue-400'
                       : Math.max(blendshapesData.jawRight, blendshapesData.jawLeft) > 0.25
-                        ? 'text-amber-400'
-                        : 'text-zinc-400'
-                    }`}
+                      ? 'text-amber-400'
+                      : 'text-zinc-400'
+                  }`}
                 >
                   {(Math.max(blendshapesData.jawRight, blendshapesData.jawLeft) * 100).toFixed(0)}%
                 </span>
@@ -696,8 +747,9 @@ export default function AssistiveController() {
               <div className="flex justify-between items-center">
                 <span>Jaw Open (Scroll Mode &gt;0.45):</span>
                 <span
-                  className={`font-bold ${blendshapesData.jawOpen > 0.45 ? 'text-purple-400' : 'text-zinc-400'
-                    }`}
+                  className={`font-bold ${
+                    blendshapesData.jawOpen > 0.45 ? 'text-purple-400' : 'text-zinc-400'
+                  }`}
                 >
                   {(blendshapesData.jawOpen * 100).toFixed(0)}%
                 </span>
@@ -709,6 +761,10 @@ export default function AssistiveController() {
               <div className="flex justify-between">
                 <span>Filter:</span>
                 <span className="text-zinc-100 font-bold">EMA Smoothing (70% / 30%)</span>
+              </div>
+              <div className="flex justify-between">
+                <span>Freeze Limit:</span>
+                <span className="text-zinc-100 font-bold">Max 400 ms (Auto-Unfreeze)</span>
               </div>
               <div className="flex justify-between">
                 <span>Active Center:</span>
@@ -795,14 +851,16 @@ export default function AssistiveController() {
                 <span>{gestureStatus}</span>
               </div>
 
-                    < div
-                className={`px-3 py-1.5 rounded-lg border text-sm font-bold flex items-center gap-2 ${faceDetected
-                      ? 'bg-zinc-900/90 border-green-500 text-green-400'
-                      : 'bg-zinc-900/90 border-amber-500 text-amber-300'
-                    }`}
-                >
-                  <span aria-hidden="true">{faceDetected ? '●' : '■'}</span>
-                  <span>{faceDetected ? 'Face Locked' : 'Searching Face'}</span>
+              {/* Face Locked Status Badge */}
+              <div
+                className={`px-3 py-1.5 rounded-lg border text-sm font-bold flex items-center gap-2 ${
+                  faceDetected
+                    ? 'bg-zinc-900/90 border-green-500 text-green-400'
+                    : 'bg-zinc-900/90 border-amber-500 text-amber-300'
+                }`}
+              >
+                <span aria-hidden="true">{faceDetected ? '●' : '■'}</span>
+                <span>{faceDetected ? 'Face Locked' : 'Searching Face'}</span>
               </div>
             </div>
 
@@ -824,16 +882,16 @@ export default function AssistiveController() {
             </p>
             <ul className="list-disc list-inside space-y-1.5 pr-2">
               <li>
-                <strong>Left Click (نقرة يسار):</strong> ارفع حاجبيك لأعلى (Brow Up) للضغط كليك يسار.
+                <strong>Left Click (نقرة يسار):</strong> ارفع حاجبيك لأعلى (&gt; 50%) لإرسال نقرة واحدة؛ وأنزل حاجبيك (&lt; 20%) لتجهيز النقرة التالية (Hysteresis).
               </li>
               <li>
-                <strong>Right Click (نقرة يمين):</strong> حرّك فكك للجانب الأيمن أو الأيسر (Jaw Side) للضغط كليك يمين.
+                <strong>Right Click (نقرة يمين):</strong> حرّك فكك للجانب (&gt; 45%) لإرسال نقرة يمين؛ وأعده للمنتصف (&lt; 20%) لتجهيز النقرة التالية.
               </li>
               <li>
-                <strong>Scroll Mode (وضع التمرير):</strong> افتح فمك (Jaw Open) وحرّك رأسك لأعلى أو لأسفل للتمرير بدلاً من تحريك المؤشر.
+                <strong>Scroll Mode (وضع التمرير):</strong> افتح فمك (&gt; 45%) وحرّك رأسك لأعلى أو لأسفل للتمرير. تُعطّل النقرات تلقائياً أثناء فتح الفم لمنع أي ضغط بالخطأ.
               </li>
               <li>
-                <strong>Freeze-on-Gesture (تثبيت المؤشر):</strong> عند بدء أي إيماءة ضغط، يتجمد المؤشر تلقائياً لمنع أي انزلاق غير مرغوب أثناء الضغط.
+                <strong>Freeze-on-Gesture (تثبيت المؤشر الذكي):</strong> يتجمد المؤشر لحظة الإيماءة بحد أقصى 400ms لتثبيت الموضع، ثم يفك التجميد تلقائياً حتى لا يعلق الماوس.
               </li>
             </ul>
           </div>
