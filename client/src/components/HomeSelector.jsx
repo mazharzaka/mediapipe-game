@@ -306,20 +306,20 @@ export default function HomeSelector() {
             className="grid grid-cols-1 sm:grid-cols-2 gap-6"
             aria-label="Application choices"
           >
-            {/* Assistive Tool Button (Large Primary Action) */}
+            {/* Assistive Tool & AI Agent Button (Large Primary Action) */}
             <Link
               to="/assistive"
               className="min-h-20 sm:min-h-24 p-6 rounded-xl bg-teal-600 hover:bg-teal-500 text-white border-2 border-teal-300 flex flex-col items-center justify-center gap-2 text-center focus-visible:outline-none focus-visible:ring-4 focus-visible:ring-amber-400 focus-visible:ring-offset-4 focus-visible:ring-offset-zinc-950 transition-colors duration-150"
-              aria-label="Assistive Tool: Open head tracking mouse controller directly on this device"
+              aria-label="Assistive Tool & AI Agent: Open assistive controls and AI assistant"
             >
               <span className="text-3xl" aria-hidden="true">
-                🎯
+                🤖
               </span>
               <span className="text-xl sm:text-2xl font-bold">
-                Assistive Tool
+                المساعد الذكي وأدوات التحكم (Assistive & AI Suite)
               </span>
               <span className="text-base text-teal-100 font-medium">
-                فتح أداة تحكم الماوس بالرأس مباشرة
+                المساعد الذكي (AI Agent)، تتبع الوجه، التاتش باد، والريموت
               </span>
             </Link>
 
