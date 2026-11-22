@@ -1,4 +1,5 @@
-import { mouse, Point, keyboard, Key } from '@nut-tree/nut-js';
+import { mouse, Point, keyboard, Key, clipboard } from '@nut-tree/nut-js';
+import { spawn } from 'child_process';
 
 // Optimize responsiveness for real-time tracking & typing
 mouse.config.autoDelayMs = 0;
@@ -140,11 +141,12 @@ export async function scroll(direction, steps = 2) {
   }
 }
 
-export async function scrollDelta(dy) {
+export async function scrollDelta(dy, speedMultiplier = 1) {
   try {
     if (typeof dy !== 'number') return;
-    // Boosted 2.5x to 3x for smooth, responsive scrolling through feeds
-    const steps = Math.min(25, Math.max(3, Math.round((Math.abs(dy) / 10) * 2.8)));
+    const mult = typeof speedMultiplier === 'number' && speedMultiplier > 0 ? speedMultiplier : 1;
+    // Boosted step scaled with user-selected speed multiplier
+    const steps = Math.min(60, Math.max(1, Math.round((Math.abs(dy) / 10) * 1.5 * mult)));
     if (dy < 0) {
       await mouse.scrollUp(steps);
     } else if (dy > 0) {
@@ -250,10 +252,15 @@ export async function youtubeControl(action) {
         return { success: true, action, message: 'الفيديو التالي (Shift+N)' };
 
       case 'skip_ad':
-        // Trigger Ctrl + Shift + X (YouTube Ad Skipper Chrome Extension)
+        // 1. Trigger Ctrl + Shift + X (Instructs Chrome Extension to focus the real Skip button inside .video-ads)
         await keyboard.pressKey(Key.LeftControl, Key.LeftShift, Key.X);
         await keyboard.releaseKey(Key.LeftControl, Key.LeftShift, Key.X);
-        return { success: true, action, message: 'تخطي الإعلان (Ctrl+Shift+X)' };
+        // 2. Wait 150ms for DOM focus to settle
+        await new Promise((r) => setTimeout(r, 150));
+        // 3. Press physical Enter key with isTrusted: true on the focused skip button
+        await keyboard.pressKey(Key.Enter);
+        await keyboard.releaseKey(Key.Enter);
+        return { success: true, action, message: 'تخطي الإعلان (Focus + Enter)' };
 
       case 'volume_up':
         await keyboard.pressKey(Key.Up);
@@ -335,13 +342,25 @@ export async function switchWindow() {
 }
 
 /**
- * Type text onto the target computer with optional Enter key press
+ * Type text onto the target computer with optional Enter key press.
+ * Automatically detects non-ASCII (e.g. Arabic) and uses UTF-8 Clipboard + Ctrl+V
+ * to guarantee 100% accurate rendering without gibberish or unmapped key errors.
  */
 export async function typeText(text = '', pressEnter = false) {
   try {
     const clean = String(text || '');
     if (clean) {
-      await keyboard.type(clean);
+      const hasNonAscii = /[^\x00-\x7F]/.test(clean);
+      if (hasNonAscii) {
+        // Arabic & Unicode: Set clipboard with UTF-8 and paste via Ctrl + V
+        await setClipboard(clean);
+        await new Promise((r) => setTimeout(r, 40));
+        await keyboard.pressKey(Key.LeftControl, Key.V);
+        await keyboard.releaseKey(Key.LeftControl, Key.V);
+      } else {
+        // Standard ASCII English: direct keystrokes
+        await keyboard.type(clean);
+      }
     }
     if (pressEnter) {
       await new Promise((r) => setTimeout(r, 60));
@@ -439,6 +458,47 @@ export async function browserForward() {
     return { success: true, action: 'browser_forward', message: 'تقديم في المتصفح (Alt + Right)' };
   } catch (err) {
     console.error('[nutService] browserForward error:', err.message);
+    throw err;
+  }
+}
+
+/**
+ * Close active browser tab (Ctrl + W)
+ */
+export async function closeTab() {
+  try {
+    await keyboard.pressKey(Key.LeftControl, Key.W);
+    await keyboard.releaseKey(Key.LeftControl, Key.W);
+    return { success: true, action: 'close_tab', message: 'تم إغلاق التاب (Ctrl + W)' };
+  } catch (err) {
+    console.error('[nutService] closeTab error:', err.message);
+    throw err;
+  }
+}
+
+/**
+ * Clipboard get content (UTF-8 support for Arabic & English)
+ */
+export async function getClipboard() {
+  try {
+    const text = await clipboard.getContent();
+    return { success: true, text: text || '' };
+  } catch (err) {
+    console.error('[nutService] getClipboard error:', err.message);
+    throw err;
+  }
+}
+
+/**
+ * Clipboard set content (UTF-8 support for Arabic & English)
+ */
+export async function setClipboard(text) {
+  try {
+    const clean = String(text ?? '');
+    await clipboard.setContent(clean);
+    return { success: true, text: clean, message: 'تم نسخ النص إلى كليبورد الكمبيوتر' };
+  } catch (err) {
+    console.error('[nutService] setClipboard error:', err.message);
     throw err;
   }
 }

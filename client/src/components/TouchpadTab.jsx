@@ -4,6 +4,8 @@ import { socket } from '../socket';
 export default function TouchpadTab() {
   const [sensitivity, setSensitivity] = useState(1.8);
   const sensitivityRef = useRef(1.8);
+  const [scrollSpeed, setScrollSpeed] = useState(2);
+  const scrollSpeedRef = useRef(2);
   const [isInteracting, setIsInteracting] = useState(false);
   const [gestureFeedback, setGestureFeedback] = useState('');
   const [isBigCursor, setIsBigCursor] = useState(false);
@@ -58,8 +60,13 @@ export default function TouchpadTab() {
   };
 
   const triggerScroll = (dy) => {
-    socket.emit('touchpad_scroll', { dy });
+    socket.emit('touchpad_scroll', { dy, speedMultiplier: scrollSpeedRef.current });
     showFeedback(dy < 0 ? '▲ تمرير لأعلى' : '▼ تمرير لأسفل');
+  };
+
+  const handleCloseTab = () => {
+    socket.emit('close_tab');
+    showFeedback('✕ تم إغلاق التاب (Ctrl+W)');
   };
 
   // Continuous hold scroll support
@@ -68,7 +75,7 @@ export default function TouchpadTab() {
     triggerScroll(dy);
     scrollTimeoutRef.current = setTimeout(() => {
       scrollIntervalRef.current = setInterval(() => {
-        socket.emit('touchpad_scroll', { dy: dy * 0.75 });
+        socket.emit('touchpad_scroll', { dy: dy * 0.75, speedMultiplier: scrollSpeedRef.current });
       }, 70);
     }, 200);
   };
@@ -145,10 +152,20 @@ export default function TouchpadTab() {
       const dy = (lastTwoFingerYRef.current - midY) * 2.2; // Natural 2-finger scroll
 
       if (Math.abs(dy) > 1.5) {
-        socket.emit('touchpad_scroll', { dy });
+        socket.emit('touchpad_scroll', { dy, speedMultiplier: scrollSpeedRef.current });
         lastTwoFingerYRef.current = midY;
         showFeedback('↕️ تمرير بإصبعين (Scroll)');
       }
+    }
+  };
+
+  const handleTouchCancel = () => {
+    setIsInteracting(false);
+    isTwoFingerRef.current = false;
+    hasMovedRef.current = false;
+    if (singleTapTimerRef.current) {
+      clearTimeout(singleTapTimerRef.current);
+      singleTapTimerRef.current = null;
     }
   };
 
@@ -294,7 +311,7 @@ export default function TouchpadTab() {
         onTouchStart={handleTouchStart}
         onTouchMove={handleTouchMove}
         onTouchEnd={handleTouchEnd}
-        onTouchCancel={handleTouchEnd}
+        onTouchCancel={handleTouchCancel}
         onPointerDown={handlePointerDown}
         onPointerMove={handlePointerMove}
         onPointerUp={handlePointerUp}
@@ -332,10 +349,42 @@ export default function TouchpadTab() {
         className="flex flex-col gap-2 shrink-0 w-full pb-1"
         style={{ touchAction: 'manipulation' }}
       >
-        {/* Scroll Buttons Row (Continuous Hold Supported) */}
+        {/* Scroll Speed Selection (1x, 2x, 4x) */}
+        <div className="flex items-center justify-between gap-2 px-1 py-0.5">
+          <span className="text-xs sm:text-sm font-bold text-zinc-300">
+            سرعة التمرير (Scroll Speed):
+          </span>
+          <div className="flex items-center gap-1.5 bg-zinc-950 p-1 rounded-lg border border-zinc-800">
+            {[
+              { label: 'بطيء 1x', val: 1 },
+              { label: 'متوسط 2x', val: 2 },
+              { label: 'سريع 4x', val: 4 },
+            ].map((s) => (
+              <button
+                key={s.val}
+                type="button"
+                onClick={() => {
+                  setScrollSpeed(s.val);
+                  scrollSpeedRef.current = s.val;
+                  showFeedback(`سرعة التمرير: ${s.label}`);
+                }}
+                className={`min-h-9 px-3 py-1 rounded text-xs sm:text-sm font-bold transition-colors ${
+                  scrollSpeed === s.val
+                    ? 'bg-teal-600 text-white shadow-none'
+                    : 'text-zinc-400 hover:text-zinc-200 bg-zinc-900 border border-zinc-800'
+                }`}
+                aria-pressed={scrollSpeed === s.val}
+              >
+                {s.label}
+              </button>
+            ))}
+          </div>
+        </div>
+
+        {/* Scroll & Close Tab Buttons Row (Continuous Hold Supported) */}
         <section
-          aria-label="Continuous Scroll Buttons"
-          className="grid grid-cols-2 gap-2 sm:gap-3"
+          aria-label="Scroll and Tab Controls"
+          className="grid grid-cols-3 gap-2 sm:gap-3"
           style={{ touchAction: 'manipulation' }}
         >
           <button
@@ -345,13 +394,13 @@ export default function TouchpadTab() {
             onPointerLeave={stopContinuousScroll}
             onPointerCancel={stopContinuousScroll}
             style={{ touchAction: 'manipulation' }}
-            className="min-h-14 px-4 py-2.5 rounded-xl bg-zinc-800 hover:bg-zinc-700 active:bg-zinc-600 text-zinc-100 font-bold text-base sm:text-lg border-2 border-zinc-600 flex items-center justify-center gap-2 focus-visible:outline-none focus-visible:ring-4 focus-visible:ring-amber-400 focus-visible:ring-offset-2 focus-visible:ring-offset-zinc-950 transition-colors select-none"
+            className="min-h-14 px-2 sm:px-4 py-2.5 rounded-xl bg-zinc-800 hover:bg-zinc-700 active:bg-zinc-600 text-zinc-100 font-bold text-sm sm:text-base border-2 border-zinc-600 flex items-center justify-center gap-1.5 focus-visible:outline-none focus-visible:ring-4 focus-visible:ring-amber-400 focus-visible:ring-offset-2 focus-visible:ring-offset-zinc-950 transition-colors select-none"
             aria-label="Scroll Up (Hold for continuous)"
           >
-            <span className="text-xl" aria-hidden="true">
+            <span className="text-lg sm:text-xl" aria-hidden="true">
               ▲
             </span>
-            <span>تمرير لأعلى (اضغط واستمر)</span>
+            <span>أعلى</span>
           </button>
 
           <button
@@ -361,13 +410,26 @@ export default function TouchpadTab() {
             onPointerLeave={stopContinuousScroll}
             onPointerCancel={stopContinuousScroll}
             style={{ touchAction: 'manipulation' }}
-            className="min-h-14 px-4 py-2.5 rounded-xl bg-zinc-800 hover:bg-zinc-700 active:bg-zinc-600 text-zinc-100 font-bold text-base sm:text-lg border-2 border-zinc-600 flex items-center justify-center gap-2 focus-visible:outline-none focus-visible:ring-4 focus-visible:ring-amber-400 focus-visible:ring-offset-2 focus-visible:ring-offset-zinc-950 transition-colors select-none"
+            className="min-h-14 px-2 sm:px-4 py-2.5 rounded-xl bg-zinc-800 hover:bg-zinc-700 active:bg-zinc-600 text-zinc-100 font-bold text-sm sm:text-base border-2 border-zinc-600 flex items-center justify-center gap-1.5 focus-visible:outline-none focus-visible:ring-4 focus-visible:ring-amber-400 focus-visible:ring-offset-2 focus-visible:ring-offset-zinc-950 transition-colors select-none"
             aria-label="Scroll Down (Hold for continuous)"
           >
-            <span className="text-xl" aria-hidden="true">
+            <span className="text-lg sm:text-xl" aria-hidden="true">
               ▼
             </span>
-            <span>تمرير لأسفل (اضغط واستمر)</span>
+            <span>أسفل</span>
+          </button>
+
+          <button
+            type="button"
+            onClick={handleCloseTab}
+            style={{ touchAction: 'manipulation' }}
+            className="min-h-14 px-2 sm:px-4 py-2.5 rounded-xl bg-rose-950/80 hover:bg-rose-900/90 active:bg-rose-800 text-rose-200 font-bold text-sm sm:text-base border-2 border-rose-700/80 flex items-center justify-center gap-1.5 focus-visible:outline-none focus-visible:ring-4 focus-visible:ring-amber-400 focus-visible:ring-offset-2 focus-visible:ring-offset-zinc-950 transition-colors select-none"
+            aria-label="Close Active Browser Tab (Ctrl+W)"
+          >
+            <span className="text-lg sm:text-xl" aria-hidden="true">
+              ✕
+            </span>
+            <span>قفل التاب</span>
           </button>
         </section>
 

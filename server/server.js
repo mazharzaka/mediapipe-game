@@ -51,6 +51,21 @@ const io = new Server(server, {
 // Attach all socket handlers (Touchpad, Remote, Face tracking, AI Agent)
 setupSocketHandler(io);
 
-server.listen(env.PORT, '0.0.0.0',() => {
-  console.log(`[Server] Assistive System Backend running on http://localhost:${env.PORT}`);
+server.listen(env.PORT, '0.0.0.0', () => {
+  const status = getSystemStatus();
+  const primaryIp = status.localIps?.[0]?.ip || 'localhost';
+  const networkUrl = `http://${primaryIp}:${env.PORT}`;
+
+  console.log(`\n==================================================`);
+  console.log(`[Server] Assistive System Backend running:`);
+  console.log(`Local:   http://localhost:${env.PORT}`);
+  console.log(`Network: ${networkUrl}`);
+  console.log(`==================================================\n`);
+
+  try {
+    qrcode.generate(networkUrl, { small: true });
+    console.log(`📱 امسح الـ QR Code من كاميرا الموبايل لفتح التطبيق على الشبكة:\n`);
+  } catch (err) {
+    console.error('[Server] QR code generation error:', err.message);
+  }
 });

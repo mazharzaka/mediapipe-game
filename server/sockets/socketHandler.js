@@ -44,8 +44,17 @@ export function setupSocketHandler(io) {
       await nutService.moveDelta(dx, dy);
     });
 
-    socket.on("touchpad_scroll", async ({ dy }) => {
-      await nutService.scrollDelta(dy);
+    socket.on("touchpad_scroll", async ({ dy, speedMultiplier }) => {
+      await nutService.scrollDelta(dy, speedMultiplier);
+    });
+
+    socket.on("close_tab", async () => {
+      try {
+        const result = await nutService.closeTab();
+        socket.emit("remote_feedback", { success: true, message: result.message });
+      } catch (err) {
+        socket.emit("remote_feedback", { success: false, error: err.message });
+      }
     });
 
     socket.on("touchpad_click", async ({ button }) => {
@@ -108,6 +117,8 @@ export function setupSocketHandler(io) {
           result = await nutService.browserBack();
         } else if (action === "browser_forward") {
           result = await nutService.browserForward();
+        } else if (action === "lock" || action === "sleep") {
+          result = await systemService.executePowerAction(action);
         } else {
           throw new Error(`أمر نظام غير معروف: ${action}`);
         }
@@ -132,6 +143,41 @@ export function setupSocketHandler(io) {
         await nutService.queueLiveType(payload);
       } catch (err) {
         console.error("[socketHandler] live_type error:", err.message);
+      }
+    });
+
+    // --- Clipboard Synchronization (UTF-8 Arabic / English) ---
+    socket.on("clipboard_get", async (ack) => {
+      try {
+        const result = await nutService.getClipboard();
+        if (typeof ack === "function") ack(result);
+        socket.emit("clipboard_content", result);
+      } catch (err) {
+        if (typeof ack === "function") ack({ success: false, error: err.message });
+        socket.emit("clipboard_content", { success: false, error: err.message });
+      }
+    });
+
+    socket.on("clipboard_set", async ({ text }, ack) => {
+      try {
+        const result = await nutService.setClipboard(text);
+        if (typeof ack === "function") ack(result);
+        socket.emit("remote_feedback", { success: true, message: '✓ تم نسخ النص إلى كليبورد الكمبيوتر' });
+      } catch (err) {
+        if (typeof ack === "function") ack({ success: false, error: err.message });
+        socket.emit("remote_feedback", { success: false, error: err.message });
+      }
+    });
+
+    // --- Power Actions (Lock & Sleep) ---
+    socket.on("power_action", async ({ action }, ack) => {
+      try {
+        const result = await systemService.executePowerAction(action);
+        if (typeof ack === "function") ack(result);
+        socket.emit("remote_feedback", { success: true, message: result.message });
+      } catch (err) {
+        if (typeof ack === "function") ack({ success: false, error: err.message });
+        socket.emit("remote_feedback", { success: false, error: err.message });
       }
     });
 

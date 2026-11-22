@@ -442,19 +442,21 @@ export default function AssistiveController() {
 
         {/* Server connection indicator */}
         <div
-          className="flex items-center gap-2 px-4 py-2 rounded-lg bg-zinc-900 border border-zinc-700"
+          className={`flex items-center gap-2 px-3.5 py-2 rounded-xl border-2 text-sm sm:text-base font-bold transition-colors ${
+            socketConnected
+              ? 'bg-emerald-950/90 border-emerald-500/70 text-emerald-200'
+              : 'bg-rose-950/90 border-rose-500/70 text-rose-200'
+          }`}
           role="status"
           aria-live="polite"
         >
           <span
-            className={`inline-block w-3.5 h-3.5 rounded-full ${
-              socketConnected ? 'bg-green-500' : 'bg-red-500'
+            className={`inline-block w-3 h-3 rounded-full ${
+              socketConnected ? 'bg-emerald-400 animate-pulse' : 'bg-rose-500'
             }`}
             aria-hidden="true"
           />
-          <span className="text-base font-semibold text-zinc-200">
-            {socketConnected ? '[●] Server Connected' : '[■] Server Offline'}
-          </span>
+          <span>{socketConnected ? 'متصل بالكمبيوتر' : 'غير متصل بالكمبيوتر'}</span>
         </div>
       </header>
 
