@@ -126,6 +126,15 @@ export function setupSocketHandler(io) {
       }
     });
 
+    // Real-time Live Typing per-keystroke event
+    socket.on("live_type", async (payload) => {
+      try {
+        await nutService.queueLiveType(payload);
+      } catch (err) {
+        console.error("[socketHandler] live_type error:", err.message);
+      }
+    });
+
     // --- 4. AI Agent OS Assistant Events ---
     socket.on("ai_command", async (payload) => {
       const prompt =

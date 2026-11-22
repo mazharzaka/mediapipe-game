@@ -1,7 +1,8 @@
 import { mouse, Point, keyboard, Key } from '@nut-tree/nut-js';
 
-// Optimize responsiveness for real-time tracking
+// Optimize responsiveness for real-time tracking & typing
 mouse.config.autoDelayMs = 0;
+keyboard.config.autoDelayMs = 0;
 
 // Track cursor coordinates purely in software to avoid native getPosition bugs on Windows multi-monitor setups
 let cachedPos = { x: 960, y: 540 };
@@ -360,17 +361,44 @@ export async function typeText(text = '', pressEnter = false) {
 }
 
 /**
- * Press Backspace key
+ * Press Backspace key (supports single or multiple strokes)
  */
-export async function backspace() {
+export async function backspace(count = 1) {
   try {
-    await keyboard.pressKey(Key.Backspace);
-    await keyboard.releaseKey(Key.Backspace);
-    return { success: true, action: 'backspace', message: 'مسح (Backspace)' };
+    const c = Math.min(Math.max(1, count), 100);
+    for (let i = 0; i < c; i++) {
+      await keyboard.pressKey(Key.Backspace);
+      await keyboard.releaseKey(Key.Backspace);
+    }
+    return { success: true, count: c, action: 'backspace', message: `مسح (${c} Backspace)` };
   } catch (err) {
     console.error('[nutService] backspace error:', err.message);
     throw err;
   }
+}
+
+/**
+ * Sequential queue for Live Typing to prevent out-of-order execution
+ */
+let liveTypingQueue = Promise.resolve();
+
+export function queueLiveType({ text, backspaces, enter }) {
+  liveTypingQueue = liveTypingQueue
+    .then(async () => {
+      if (backspaces && backspaces > 0) {
+        await backspace(backspaces);
+      }
+      if (text && text.length > 0) {
+        await typeText(text, false);
+      }
+      if (enter) {
+        await pressEnterKey();
+      }
+    })
+    .catch((err) => {
+      console.error('[nutService] queueLiveType error:', err.message);
+    });
+  return liveTypingQueue;
 }
 
 /**

@@ -1,14 +1,23 @@
 import express from 'express';
 import http from 'http';
+import path from 'path';
+import { fileURLToPath } from 'url';
 import cors from 'cors';
 import { Server } from 'socket.io';
 import { env } from './config/env.js';
 import { setupSocketHandler } from './sockets/socketHandler.js';
 import { getSystemStatus } from './services/systemService.js';
 
+const __filename = fileURLToPath(import.meta.url);
+const __dirname = path.dirname(__filename);
+const clientDist = path.resolve(__dirname, '../client/dist');
+
 const app = express();
 app.use(cors({ origin: env.CORS_ORIGIN }));
 app.use(express.json());
+
+// Serve built frontend assets in production mode
+app.use(express.static(clientDist));
 
 // API route to provide local network IP address for QR code mobile pairing
 app.get('/api/network-info', (req, res) => {
@@ -26,6 +35,14 @@ app.get('/api/health', (req, res) => {
   res.json({ status: 'ok', uptime: process.uptime() });
 });
 
+// SPA fallback for client-side routing (Express 5 compatible)
+app.use((req, res, next) => {
+  if (req.path.startsWith('/api') || req.path.startsWith('/socket.io')) {
+    return next();
+  }
+  res.sendFile(path.join(clientDist, 'index.html'));
+});
+
 const server = http.createServer(app);
 const io = new Server(server, {
   cors: { origin: env.CORS_ORIGIN },
@@ -34,6 +51,6 @@ const io = new Server(server, {
 // Attach all socket handlers (Touchpad, Remote, Face tracking, AI Agent)
 setupSocketHandler(io);
 
-server.listen(env.PORT, () => {
+server.listen(env.PORT, '0.0.0.0',() => {
   console.log(`[Server] Assistive System Backend running on http://localhost:${env.PORT}`);
 });

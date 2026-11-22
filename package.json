@@ -1,0 +1,12 @@
+{
+  "name": "mediapipe-game-suite",
+  "private": true,
+  "version": "1.0.0",
+  "type": "module",
+  "scripts": {
+    "client:dev": "npm run dev --prefix client",
+    "client:build": "npm run build --prefix client",
+    "server:dev": "npm run dev --prefix server",
+    "start:fast": "npm run build --prefix client && cd server && node server.js"
+  }
+}

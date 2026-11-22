@@ -1,4 +1,13 @@
 import dotenv from "dotenv";
+import path from "path";
+import { fileURLToPath } from "url";
+
+const __filename = fileURLToPath(import.meta.url);
+const __dirname = path.dirname(__filename);
+const serverEnvPath = path.resolve(__dirname, "../.env");
+
+// Explicitly load server/.env regardless of process.cwd()
+dotenv.config({ path: serverEnvPath });
 dotenv.config();
 
 export const env = {

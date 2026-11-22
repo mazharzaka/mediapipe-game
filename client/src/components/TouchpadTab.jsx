@@ -289,7 +289,7 @@ export default function TouchpadTab() {
         </div>
       </div>
 
-      {/* Main Touchpad Surface (Takes all remaining screen height flex-1, touch-action: none ONLY on this) */}
+      {/* Main Touchpad Surface (Takes all remaining screen height flex-1, min-h-[280px], touch-action: none ONLY on this) */}
       <div
         onTouchStart={handleTouchStart}
         onTouchMove={handleTouchMove}
@@ -300,7 +300,7 @@ export default function TouchpadTab() {
         onPointerUp={handlePointerUp}
         onPointerCancel={handlePointerUp}
         style={{ touchAction: 'none' }}
-        className={`flex-1 min-h-0 w-full rounded-2xl bg-zinc-900 border-2 transition-colors flex flex-col items-center justify-center p-4 relative cursor-crosshair select-none ${
+        className={`flex-1 min-h-[280px] w-full rounded-2xl bg-zinc-900 border-2 transition-colors flex flex-col items-center justify-center p-4 relative cursor-crosshair select-none ${
           isInteracting ? 'border-teal-400 bg-zinc-900/95' : 'border-zinc-700'
         }`}
         role="region"
