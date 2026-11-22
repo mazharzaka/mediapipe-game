@@ -3,6 +3,8 @@ import { socket } from '../socket';
 
 export default function RemoteTab() {
   const [feedback, setFeedback] = useState('');
+  const [textToType, setTextToType] = useState('');
+  const [pressEnter, setPressEnter] = useState(true);
 
   useEffect(() => {
     const handleFeedback = (data) => {
@@ -11,7 +13,7 @@ export default function RemoteTab() {
       } else if (data?.error) {
         setFeedback(`✕ خطأ: ${data.error}`);
       }
-      setTimeout(() => setFeedback(''), 2000);
+      setTimeout(() => setFeedback(''), 2500);
     };
 
     socket.on('remote_feedback', handleFeedback);
@@ -26,6 +28,10 @@ export default function RemoteTab() {
     socket.emit('remote_media', { action });
   };
 
+  const triggerSystemControl = (action) => {
+    socket.emit('system_control', { action });
+  };
+
   const triggerClick = (button) => {
     socket.emit('mouse_click', { button });
   };
@@ -37,6 +43,15 @@ export default function RemoteTab() {
   const launchApp = (appName) => {
     socket.emit('ai_command', { text: `افتح تطبيق ${appName}` });
     setFeedback(`جاري طلب تشغيل ${appName}...`);
+    setTimeout(() => setFeedback(''), 2000);
+  };
+
+  const handleSendText = (e) => {
+    e?.preventDefault();
+    if (!textToType.trim()) return;
+    socket.emit('type_text', { text: textToType, pressEnter });
+    setTextToType('');
+    setFeedback('جاري كتابة النص على اللابتوب...');
     setTimeout(() => setFeedback(''), 2000);
   };
 
@@ -242,7 +257,187 @@ export default function RemoteTab() {
         </div>
       </section>
 
-      {/* SECTION 2: SYSTEM AUDIO & GENERAL MOUSE CONTROLS */}
+      {/* SECTION 2: BROWSER ZOOM & WINDOW SWITCH CONTROLS */}
+      <section
+        aria-label="Browser Zoom and Window Switching Controls"
+        className="p-6 rounded-2xl bg-zinc-900 border-2 border-zinc-700 flex flex-col gap-5"
+      >
+        <div className="flex flex-col sm:flex-row items-start sm:items-center justify-between gap-2 border-b border-zinc-800 pb-3">
+          <div className="flex items-center gap-3">
+            <span className="text-3xl" aria-hidden="true">
+              🪟
+            </span>
+            <h3 className="text-2xl font-bold text-zinc-50">
+              التحكم في النوافذ والتكبير (Windows & Zoom)
+            </h3>
+          </div>
+          <span className="text-sm font-semibold text-zinc-400">
+            تكبير/تصغير صفحات الويب والتبديل السريع بين التطبيقات
+          </span>
+        </div>
+
+        <div className="grid grid-cols-2 sm:grid-cols-3 lg:grid-cols-6 gap-3">
+          <button
+            type="button"
+            onClick={() => triggerSystemControl('browser_back')}
+            className="min-h-16 px-4 py-3 rounded-xl bg-zinc-800 hover:bg-zinc-700 text-zinc-50 font-bold text-base sm:text-lg border-2 border-zinc-600 flex items-center justify-center gap-2 focus-visible:outline-none focus-visible:ring-4 focus-visible:ring-amber-400 focus-visible:ring-offset-2 focus-visible:ring-offset-zinc-950 transition-colors"
+            aria-label="Browser Back (Alt + Left)"
+          >
+            <span className="text-xl" aria-hidden="true">
+              ⬅
+            </span>
+            <span>رجوع (Alt+←)</span>
+          </button>
+
+          <button
+            type="button"
+            onClick={() => triggerSystemControl('browser_forward')}
+            className="min-h-16 px-4 py-3 rounded-xl bg-zinc-800 hover:bg-zinc-700 text-zinc-50 font-bold text-base sm:text-lg border-2 border-zinc-600 flex items-center justify-center gap-2 focus-visible:outline-none focus-visible:ring-4 focus-visible:ring-amber-400 focus-visible:ring-offset-2 focus-visible:ring-offset-zinc-950 transition-colors"
+            aria-label="Browser Forward (Alt + Right)"
+          >
+            <span className="text-xl" aria-hidden="true">
+              ➡
+            </span>
+            <span>تقديم (Alt+→)</span>
+          </button>
+
+          <button
+            type="button"
+            onClick={() => triggerSystemControl('zoom_in')}
+            className="min-h-16 px-4 py-3 rounded-xl bg-zinc-800 hover:bg-zinc-700 text-zinc-50 font-bold text-base sm:text-lg border-2 border-zinc-600 flex items-center justify-center gap-2 focus-visible:outline-none focus-visible:ring-4 focus-visible:ring-amber-400 focus-visible:ring-offset-2 focus-visible:ring-offset-zinc-950 transition-colors"
+            aria-label="Zoom In (Ctrl +)"
+          >
+            <span className="text-xl" aria-hidden="true">
+              🔍+
+            </span>
+            <span>تكبير (Ctrl +)</span>
+          </button>
+
+          <button
+            type="button"
+            onClick={() => triggerSystemControl('zoom_out')}
+            className="min-h-16 px-4 py-3 rounded-xl bg-zinc-800 hover:bg-zinc-700 text-zinc-50 font-bold text-base sm:text-lg border-2 border-zinc-600 flex items-center justify-center gap-2 focus-visible:outline-none focus-visible:ring-4 focus-visible:ring-amber-400 focus-visible:ring-offset-2 focus-visible:ring-offset-zinc-950 transition-colors"
+            aria-label="Zoom Out (Ctrl -)"
+          >
+            <span className="text-xl" aria-hidden="true">
+              🔍-
+            </span>
+            <span>تصغير (Ctrl -)</span>
+          </button>
+
+          <button
+            type="button"
+            onClick={() => triggerSystemControl('zoom_reset')}
+            className="min-h-16 px-4 py-3 rounded-xl bg-zinc-800 hover:bg-zinc-700 text-zinc-50 font-bold text-base sm:text-lg border-2 border-zinc-600 flex items-center justify-center gap-2 focus-visible:outline-none focus-visible:ring-4 focus-visible:ring-amber-400 focus-visible:ring-offset-2 focus-visible:ring-offset-zinc-950 transition-colors"
+            aria-label="Reset Zoom (Ctrl 0)"
+          >
+            <span className="text-xl" aria-hidden="true">
+              🔄
+            </span>
+            <span>حجم 100%</span>
+          </button>
+
+          <button
+            type="button"
+            onClick={() => triggerSystemControl('switch_window')}
+            className="min-h-16 px-4 py-3 rounded-xl bg-teal-700 hover:bg-teal-600 text-white font-bold text-base sm:text-lg border-2 border-teal-300 flex items-center justify-center gap-2 focus-visible:outline-none focus-visible:ring-4 focus-visible:ring-amber-400 focus-visible:ring-offset-2 focus-visible:ring-offset-zinc-950 transition-colors"
+            aria-label="Switch Windows (Alt + Tab)"
+          >
+            <span className="text-xl" aria-hidden="true">
+              📑
+            </span>
+            <span>تبديل النوافذ</span>
+          </button>
+        </div>
+      </section>
+
+      {/* SECTION 3: QUICK TYPE TO PC */}
+      <section
+        aria-label="Quick Type text to Computer"
+        className="p-6 rounded-2xl bg-zinc-900 border-2 border-zinc-700 flex flex-col gap-4"
+      >
+        <div className="flex flex-col sm:flex-row items-start sm:items-center justify-between gap-2 border-b border-zinc-800 pb-3">
+          <div className="flex items-center gap-3">
+            <span className="text-3xl" aria-hidden="true">
+              ⌨️
+            </span>
+            <h3 className="text-2xl font-bold text-zinc-50">
+              الكتابة السريعة للكمبيوتر (Quick Type to PC)
+            </h3>
+          </div>
+          <span className="text-sm font-semibold text-zinc-400">
+            اكتب أي نص من هاتفك ليتم كتابته فوراً في النافذة النشطة على اللابتوب
+          </span>
+        </div>
+
+        <form onSubmit={handleSendText} className="flex flex-col gap-4">
+          <div className="flex flex-col sm:flex-row items-stretch gap-3">
+            <input
+              type="text"
+              value={textToType}
+              onChange={(e) => setTextToType(e.target.value)}
+              placeholder="اكتب هنا النص المراد إرساله للكمبيوتر..."
+              className="flex-1 min-h-14 px-4 py-3 rounded-xl bg-zinc-950 border-2 border-zinc-700 text-zinc-100 placeholder-zinc-500 text-lg font-medium focus:outline-none focus:border-teal-400 focus:ring-4 focus:ring-teal-500/20"
+              aria-label="Text to type on computer"
+            />
+
+            <button
+              type="submit"
+              disabled={!textToType.trim()}
+              className="min-h-14 px-6 py-3 rounded-xl bg-teal-600 hover:bg-teal-500 disabled:bg-zinc-800 disabled:text-zinc-500 disabled:border-zinc-700 text-white font-bold text-lg border-2 border-teal-300 flex items-center justify-center gap-2 focus-visible:outline-none focus-visible:ring-4 focus-visible:ring-amber-400 focus-visible:ring-offset-2 focus-visible:ring-offset-zinc-950 transition-colors"
+              aria-label="Send Text to PC"
+            >
+              <span className="text-xl" aria-hidden="true">
+                🚀
+              </span>
+              <span>إرسال النص</span>
+            </button>
+          </div>
+
+          <div className="flex flex-wrap items-center justify-between gap-3 pt-1">
+            <label className="flex items-center gap-2 cursor-pointer select-none">
+              <input
+                type="checkbox"
+                checked={pressEnter}
+                onChange={(e) => setPressEnter(e.target.checked)}
+                className="w-5 h-5 accent-teal-500 rounded cursor-pointer"
+              />
+              <span className="text-base font-bold text-zinc-300">
+                الضغط التلقائي على Enter بعد كتابة النص (للبحث أو الإرسال الفوري)
+              </span>
+            </label>
+
+            {/* Quick Backspace & Enter Buttons */}
+            <div className="flex items-center gap-2">
+              <button
+                type="button"
+                onClick={() => triggerSystemControl('backspace')}
+                className="min-h-14 px-4 py-2 rounded-xl bg-zinc-800 hover:bg-zinc-700 text-amber-300 font-bold text-base border-2 border-zinc-600 flex items-center justify-center gap-2 focus-visible:outline-none focus-visible:ring-4 focus-visible:ring-amber-400 focus-visible:ring-offset-2 focus-visible:ring-offset-zinc-950 transition-colors"
+                aria-label="Press Backspace key"
+              >
+                <span className="text-xl" aria-hidden="true">
+                  ⌫
+                </span>
+                <span>مسح (Backspace)</span>
+              </button>
+
+              <button
+                type="button"
+                onClick={() => triggerSystemControl('enter')}
+                className="min-h-14 px-4 py-2 rounded-xl bg-zinc-800 hover:bg-zinc-700 text-teal-300 font-bold text-base border-2 border-zinc-600 flex items-center justify-center gap-2 focus-visible:outline-none focus-visible:ring-4 focus-visible:ring-amber-400 focus-visible:ring-offset-2 focus-visible:ring-offset-zinc-950 transition-colors"
+                aria-label="Press Enter key"
+              >
+                <span className="text-xl" aria-hidden="true">
+                  ↵
+                </span>
+                <span>إدخال (Enter)</span>
+              </button>
+            </div>
+          </div>
+        </form>
+      </section>
+
+      {/* SECTION 4: SYSTEM AUDIO & GENERAL MOUSE CONTROLS */}
       <div className="grid grid-cols-1 md:grid-cols-2 gap-6">
         {/* General System Audio */}
         <section

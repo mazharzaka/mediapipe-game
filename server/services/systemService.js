@@ -1,4 +1,4 @@
-import { exec } from 'child_process';
+import { exec, spawn } from 'child_process';
 import os from 'os';
 
 // Whitelist of supported and safe applications
@@ -163,6 +163,43 @@ export function executePowerAction(action) {
         success: true,
         action: act,
         message: `تم تنفيذ أمر الطاقة (${act}) بنجاح`,
+      });
+    });
+  });
+}
+
+/**
+ * Toggle Windows mouse cursor size (96px for Big Cursor, 32px for normal)
+ * Applies immediately via SPI_SETCURSORSIZE (0x2029) and SPI_SETCURSORS (0x0057) without reboot or logout.
+ */
+export function toggleBigCursor(enable = true) {
+  return new Promise((resolve, reject) => {
+    const size = enable ? 96 : 32;
+    const psScript = `
+      Set-ItemProperty -Path 'HKCU:\\Control Panel\\Cursors' -Name 'CursorBaseSize' -Value ${size} -Type DWord;
+      $sig = '[DllImport("user32.dll")] public static extern bool SystemParametersInfo(uint a, uint b, IntPtr c, uint d);';
+      $w = Add-Type -MemberDefinition $sig -Name 'CUtil${Date.now()}' -Namespace 'W32' -PassThru;
+      $w::SystemParametersInfo(0x2029, 0, [IntPtr]${size}, 3);
+      $w::SystemParametersInfo(0x0057, 0, [IntPtr]::Zero, 3);
+    `;
+
+    const ps = spawn('powershell.exe', ['-NoProfile', '-ExecutionPolicy', 'Bypass', '-Command', psScript]);
+    let stderr = '';
+
+    ps.stderr.on('data', (d) => {
+      stderr += d.toString();
+    });
+
+    ps.on('close', (code) => {
+      if (code !== 0) {
+        console.error('[systemService] toggleBigCursor error:', stderr);
+        return reject(new Error(stderr || `PowerShell exited with code ${code}`));
+      }
+      resolve({
+        success: true,
+        enabled: enable,
+        size,
+        message: enable ? 'تم تفعيل وضع الماوس الكبير (96px)' : 'تم استعادة حجم الماوس الطبيعي (32px)',
       });
     });
   });

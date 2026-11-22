@@ -6,10 +6,15 @@ export default function TouchpadTab() {
   const sensitivityRef = useRef(1.8);
   const [isInteracting, setIsInteracting] = useState(false);
   const [gestureFeedback, setGestureFeedback] = useState('');
+  const [isBigCursor, setIsBigCursor] = useState(false);
 
   // rAF motion accumulator refs
   const pendingDeltaRef = useRef({ dx: 0, dy: 0 });
   const rafRef = useRef(null);
+
+  // Continuous hold scroll refs
+  const scrollIntervalRef = useRef(null);
+  const scrollTimeoutRef = useRef(null);
 
   // Single & Double Tap tracking refs
   const touchStartRef = useRef({ x: 0, y: 0, time: 0 });
@@ -31,15 +36,48 @@ export default function TouchpadTab() {
   }, [sensitivity]);
 
   useEffect(() => {
+    const handleBigCursorStatus = (data) => {
+      if (typeof data?.enabled === 'boolean') {
+        setIsBigCursor(data.enabled);
+      }
+    };
+    socket.on('big_cursor_status', handleBigCursorStatus);
+
     return () => {
+      socket.off('big_cursor_status', handleBigCursorStatus);
       if (rafRef.current) cancelAnimationFrame(rafRef.current);
       if (singleTapTimerRef.current) clearTimeout(singleTapTimerRef.current);
+      if (scrollTimeoutRef.current) clearTimeout(scrollTimeoutRef.current);
+      if (scrollIntervalRef.current) clearInterval(scrollIntervalRef.current);
     };
   }, []);
 
   const showFeedback = (text) => {
     setGestureFeedback(text);
     setTimeout(() => setGestureFeedback(''), 1200);
+  };
+
+  const triggerScroll = (dy) => {
+    socket.emit('touchpad_scroll', { dy });
+    showFeedback(dy < 0 ? '▲ تمرير لأعلى' : '▼ تمرير لأسفل');
+  };
+
+  // Continuous hold scroll support
+  const startContinuousScroll = (dy) => {
+    stopContinuousScroll();
+    triggerScroll(dy);
+    scrollTimeoutRef.current = setTimeout(() => {
+      scrollIntervalRef.current = setInterval(() => {
+        socket.emit('touchpad_scroll', { dy: dy * 0.75 });
+      }, 70);
+    }, 200);
+  };
+
+  const stopContinuousScroll = () => {
+    if (scrollTimeoutRef.current) clearTimeout(scrollTimeoutRef.current);
+    if (scrollIntervalRef.current) clearInterval(scrollIntervalRef.current);
+    scrollTimeoutRef.current = null;
+    scrollIntervalRef.current = null;
   };
 
   // Flush accumulated deltas synced with screen refresh (rAF)
@@ -58,6 +96,7 @@ export default function TouchpadTab() {
   // --- TOUCH EVENTS (Mobile & Touchscreens with 1-finger / 2-finger gestures) ---
   const handleTouchStart = (e) => {
     setIsInteracting(true);
+    socket.emit('touchpad_start');
     const touches = e.touches;
 
     if (touches.length === 1) {
@@ -90,9 +129,9 @@ export default function TouchpadTab() {
         hasMovedRef.current = true;
       }
 
-      // Acceleration curve: smooth for precision, accelerated for fast strokes
-      const dist = Math.hypot(rawDx, rawDy);
-      const accel = 1 + Math.min(dist / 10, 2.8);
+      // Smooth step acceleration: stepDist > 12 gives 1.8x boost, otherwise 1.0x linear
+      const stepDist = Math.hypot(rawDx, rawDy);
+      const accel = stepDist > 12 ? 1.8 : 1.0;
 
       pendingDeltaRef.current.dx += rawDx * sensitivityRef.current * accel;
       pendingDeltaRef.current.dy += rawDy * sensitivityRef.current * accel;
@@ -148,6 +187,7 @@ export default function TouchpadTab() {
   const handlePointerDown = (e) => {
     if (e.pointerType === 'touch') return; // Handled by Touch events
     e.currentTarget.setPointerCapture(e.pointerId);
+    socket.emit('touchpad_start');
     isPointerDownRef.current = true;
     lastPointerPosRef.current = { x: e.clientX, y: e.clientY };
     setIsInteracting(true);
@@ -158,8 +198,8 @@ export default function TouchpadTab() {
     const rawDx = e.clientX - lastPointerPosRef.current.x;
     const rawDy = e.clientY - lastPointerPosRef.current.y;
 
-    const dist = Math.hypot(rawDx, rawDy);
-    const accel = 1 + Math.min(dist / 10, 2.5);
+    const stepDist = Math.hypot(rawDx, rawDy);
+    const accel = stepDist > 12 ? 1.8 : 1.0;
 
     pendingDeltaRef.current.dx += rawDx * sensitivityRef.current * accel;
     pendingDeltaRef.current.dy += rawDy * sensitivityRef.current * accel;
@@ -187,37 +227,49 @@ export default function TouchpadTab() {
     showFeedback('✌️ دبل كليك');
   };
 
-  const triggerScroll = (dy) => {
-    socket.emit('touchpad_scroll', { dy });
-    showFeedback(dy < 0 ? '▲ تمرير لأعلى' : '▼ تمرير لأسفل');
-  };
-
   return (
-    <div className="flex flex-col gap-6 w-full" aria-label="Touchpad Mouse Controller">
-      {/* Information Header & Sensitivity */}
-      <div className="p-6 rounded-xl bg-zinc-900 border-2 border-zinc-700 flex flex-col sm:flex-row items-start sm:items-center justify-between gap-4">
-        <div>
-          <h2 className="text-2xl font-bold text-zinc-50">
-            🖱️ التاتش باد الذكي (Touchpad Controller)
-          </h2>
-          <p className="text-base text-zinc-300 mt-1">
-            دعم كامل للشاشات المتعددة (Multi-Monitor)، تسارع فائق النعومة، وإيماءات اللمس السريعة.
-          </p>
-        </div>
-
-        {/* Gesture feedback badge / Sensitivity */}
-        <div className="flex items-center gap-4">
+    <div
+      className="h-[calc(100dvh-64px)] max-h-[calc(100dvh-64px)] overflow-hidden flex flex-col gap-2 w-full select-none"
+      aria-label="Touchpad Mouse Controller"
+    >
+      {/* Information Header, Big Cursor & Sensitivity */}
+      <div className="p-3 sm:p-4 rounded-xl bg-zinc-900 border-2 border-zinc-700 flex flex-wrap items-center justify-between gap-3 shrink-0">
+        <div className="flex items-center gap-2">
+          <span className="text-2xl" aria-hidden="true">
+            🖱️
+          </span>
+          <h2 className="text-xl sm:text-2xl font-bold text-zinc-50">التاتش باد الذكي</h2>
           {gestureFeedback && (
             <span
-              className="px-3 py-1.5 rounded-lg bg-teal-950 border border-teal-400 text-teal-300 font-bold text-base animate-in fade-in"
+              className="px-2.5 py-1 rounded-md bg-teal-950 border border-teal-400 text-teal-300 font-bold text-sm animate-in fade-in"
               role="status"
             >
               {gestureFeedback}
             </span>
           )}
+        </div>
 
-          <div className="flex items-center gap-3 bg-zinc-950 px-4 py-2 rounded-lg border border-zinc-800">
-            <label htmlFor="tp-sens" className="text-sm font-bold text-zinc-300">
+        {/* Controls bar: Big Cursor Toggle & Sensitivity */}
+        <div className="flex items-center gap-2 sm:gap-3">
+          {/* Big Cursor Mode Toggle Button (WCAG AAA >= 56px) */}
+          <button
+            type="button"
+            onClick={() => socket.emit('toggle_big_cursor', { enable: !isBigCursor })}
+            className={`min-h-14 px-3 sm:px-4 py-2 rounded-xl font-bold text-sm sm:text-base border-2 flex items-center justify-center gap-1.5 focus-visible:outline-none focus-visible:ring-4 focus-visible:ring-amber-400 focus-visible:ring-offset-2 focus-visible:ring-offset-zinc-950 transition-colors ${
+              isBigCursor
+                ? 'bg-amber-600 hover:bg-amber-500 text-white border-amber-300'
+                : 'bg-zinc-800 hover:bg-zinc-700 text-zinc-100 border-zinc-600'
+            }`}
+            aria-label="Toggle Big Mouse Cursor (96px)"
+          >
+            <span className="text-lg" aria-hidden="true">
+              🔍
+            </span>
+            <span>{isBigCursor ? 'ماوس كبير: 96px' : 'ماوس كبير 🔍'}</span>
+          </button>
+
+          <div className="flex items-center gap-2 bg-zinc-950 px-3 py-2 rounded-xl border border-zinc-800 min-h-14">
+            <label htmlFor="tp-sens" className="text-xs sm:text-sm font-bold text-zinc-300">
               الحساسية:
             </label>
             <input
@@ -228,122 +280,143 @@ export default function TouchpadTab() {
               step="0.5"
               value={sensitivity}
               onChange={(e) => setSensitivity(parseFloat(e.target.value))}
-              className="w-24 accent-teal-500 cursor-pointer"
+              className="w-16 sm:w-20 accent-teal-500 cursor-pointer"
             />
-            <span className="font-mono text-teal-400 font-bold text-base">
+            <span className="font-mono text-teal-400 font-bold text-sm">
               {sensitivity.toFixed(1)}x
             </span>
           </div>
         </div>
       </div>
 
-      {/* Main Touchpad Grid: Track Surface + Scroll Controls */}
-      <div className="grid grid-cols-1 md:grid-cols-12 gap-6 items-stretch">
-        {/* Trackpad Active Surface */}
-        <div
-          onTouchStart={handleTouchStart}
-          onTouchMove={handleTouchMove}
-          onTouchEnd={handleTouchEnd}
-          onTouchCancel={handleTouchEnd}
-          onPointerDown={handlePointerDown}
-          onPointerMove={handlePointerMove}
-          onPointerUp={handlePointerUp}
-          onPointerCancel={handlePointerUp}
-          className={`md:col-span-10 min-h-[360px] sm:min-h-[420px] rounded-2xl bg-zinc-900 border-2 transition-colors flex flex-col items-center justify-center p-6 select-none touch-none cursor-crosshair relative ${
-            isInteracting ? 'border-teal-400 bg-zinc-900/95' : 'border-zinc-700'
-          }`}
-          role="region"
-          aria-label="Touchpad surface"
-        >
-          <div className="flex flex-col items-center gap-3 text-center pointer-events-none select-none">
-            <span className="text-5xl" aria-hidden="true">
-              🖱️
+      {/* Main Touchpad Surface (Takes all remaining screen height flex-1, touch-action: none ONLY on this) */}
+      <div
+        onTouchStart={handleTouchStart}
+        onTouchMove={handleTouchMove}
+        onTouchEnd={handleTouchEnd}
+        onTouchCancel={handleTouchEnd}
+        onPointerDown={handlePointerDown}
+        onPointerMove={handlePointerMove}
+        onPointerUp={handlePointerUp}
+        onPointerCancel={handlePointerUp}
+        style={{ touchAction: 'none' }}
+        className={`flex-1 min-h-0 w-full rounded-2xl bg-zinc-900 border-2 transition-colors flex flex-col items-center justify-center p-4 relative cursor-crosshair select-none ${
+          isInteracting ? 'border-teal-400 bg-zinc-900/95' : 'border-zinc-700'
+        }`}
+        role="region"
+        aria-label="Touchpad surface"
+      >
+        <div className="flex flex-col items-center gap-2 text-center pointer-events-none select-none">
+          <span className="text-4xl sm:text-5xl" aria-hidden="true">
+            🖱️
+          </span>
+          <span className="text-xl sm:text-2xl font-bold text-zinc-100">
+            {isInteracting ? 'جاري تحريك المؤشر...' : 'المس واسحب هنا للتحكم'}
+          </span>
+          <div className="inline-flex flex-wrap items-center justify-center gap-2 text-xs sm:text-sm text-zinc-300 pt-1">
+            <span className="px-2 py-0.5 rounded bg-zinc-950 border border-zinc-800">
+              👆 لمسة = كليك يسار
             </span>
-            <span className="text-2xl font-bold text-zinc-100">
-              {isInteracting ? 'جاري تحريك المؤشر...' : 'المس واسحب هنا للتحكم في الماوس'}
+            <span className="px-2 py-0.5 rounded bg-zinc-950 border border-zinc-800">
+              ✌️ لمستين = دبل كليك
             </span>
-            <div className="inline-flex flex-wrap items-center justify-center gap-2 text-sm text-zinc-300 pt-1">
-              <span className="px-2.5 py-1 rounded bg-zinc-950 border border-zinc-800">
-                👆 لمسة = كليك يسار
-              </span>
-              <span className="px-2.5 py-1 rounded bg-zinc-950 border border-zinc-800">
-                ✌️ لمستين = دبل كليك
-              </span>
-              <span className="px-2.5 py-1 rounded bg-zinc-950 border border-zinc-800">
-                ↕️ سحب بإصبعين = سكرول
-              </span>
-            </div>
+            <span className="px-2 py-0.5 rounded bg-zinc-950 border border-zinc-800">
+              ↕️ سحب بإصبعين = سكرول
+            </span>
           </div>
-        </div>
-
-        {/* Vertical Scroll Strip */}
-        <div className="md:col-span-2 flex flex-col gap-3">
-          <button
-            type="button"
-            onClick={() => triggerScroll(-70)}
-            className="flex-1 min-h-20 rounded-xl bg-zinc-900 hover:bg-zinc-800 border-2 border-zinc-700 hover:border-zinc-500 text-zinc-100 font-bold text-xl flex flex-col items-center justify-center gap-1 focus-visible:outline-none focus-visible:ring-4 focus-visible:ring-amber-400 focus-visible:ring-offset-2 focus-visible:ring-offset-zinc-950 transition-colors"
-            aria-label="Scroll Up"
-          >
-            <span className="text-3xl" aria-hidden="true">
-              ▲
-            </span>
-            <span className="text-sm">تمرير لأعلى</span>
-          </button>
-
-          <button
-            type="button"
-            onClick={() => triggerScroll(70)}
-            className="flex-1 min-h-20 rounded-xl bg-zinc-900 hover:bg-zinc-800 border-2 border-zinc-700 hover:border-zinc-500 text-zinc-100 font-bold text-xl flex flex-col items-center justify-center gap-1 focus-visible:outline-none focus-visible:ring-4 focus-visible:ring-amber-400 focus-visible:ring-offset-2 focus-visible:ring-offset-zinc-950 transition-colors"
-            aria-label="Scroll Down"
-          >
-            <span className="text-3xl" aria-hidden="true">
-              ▼
-            </span>
-            <span className="text-sm">تمرير لأسفل</span>
-          </button>
         </div>
       </div>
 
-      {/* Large Accessible Bottom Click Buttons (WCAG AAA >= 56px) */}
-      <section aria-label="Mouse Click Action Buttons">
-        <div className="grid grid-cols-1 sm:grid-cols-3 gap-4">
+      {/* Pinned Bottom Controls (Fixed at bottom with touch-action: manipulation to prevent click lockup) */}
+      <div
+        className="flex flex-col gap-2 shrink-0 w-full pb-1"
+        style={{ touchAction: 'manipulation' }}
+      >
+        {/* Scroll Buttons Row (Continuous Hold Supported) */}
+        <section
+          aria-label="Continuous Scroll Buttons"
+          className="grid grid-cols-2 gap-2 sm:gap-3"
+          style={{ touchAction: 'manipulation' }}
+        >
+          <button
+            type="button"
+            onPointerDown={() => startContinuousScroll(-70)}
+            onPointerUp={stopContinuousScroll}
+            onPointerLeave={stopContinuousScroll}
+            onPointerCancel={stopContinuousScroll}
+            style={{ touchAction: 'manipulation' }}
+            className="min-h-14 px-4 py-2.5 rounded-xl bg-zinc-800 hover:bg-zinc-700 active:bg-zinc-600 text-zinc-100 font-bold text-base sm:text-lg border-2 border-zinc-600 flex items-center justify-center gap-2 focus-visible:outline-none focus-visible:ring-4 focus-visible:ring-amber-400 focus-visible:ring-offset-2 focus-visible:ring-offset-zinc-950 transition-colors select-none"
+            aria-label="Scroll Up (Hold for continuous)"
+          >
+            <span className="text-xl" aria-hidden="true">
+              ▲
+            </span>
+            <span>تمرير لأعلى (اضغط واستمر)</span>
+          </button>
+
+          <button
+            type="button"
+            onPointerDown={() => startContinuousScroll(70)}
+            onPointerUp={stopContinuousScroll}
+            onPointerLeave={stopContinuousScroll}
+            onPointerCancel={stopContinuousScroll}
+            style={{ touchAction: 'manipulation' }}
+            className="min-h-14 px-4 py-2.5 rounded-xl bg-zinc-800 hover:bg-zinc-700 active:bg-zinc-600 text-zinc-100 font-bold text-base sm:text-lg border-2 border-zinc-600 flex items-center justify-center gap-2 focus-visible:outline-none focus-visible:ring-4 focus-visible:ring-amber-400 focus-visible:ring-offset-2 focus-visible:ring-offset-zinc-950 transition-colors select-none"
+            aria-label="Scroll Down (Hold for continuous)"
+          >
+            <span className="text-xl" aria-hidden="true">
+              ▼
+            </span>
+            <span>تمرير لأسفل (اضغط واستمر)</span>
+          </button>
+        </section>
+
+        {/* Large Click Buttons Row (WCAG AAA >= 56px) */}
+        <section
+          aria-label="Mouse Click Action Buttons"
+          className="grid grid-cols-3 gap-2 sm:gap-3"
+          style={{ touchAction: 'manipulation' }}
+        >
           <button
             type="button"
             onClick={() => triggerClick('left')}
-            className="min-h-16 px-6 py-4 rounded-xl bg-teal-600 hover:bg-teal-500 text-white font-bold text-xl border-2 border-teal-300 flex items-center justify-center gap-3 focus-visible:outline-none focus-visible:ring-4 focus-visible:ring-amber-400 focus-visible:ring-offset-2 focus-visible:ring-offset-zinc-950 transition-colors duration-150"
+            style={{ touchAction: 'manipulation' }}
+            className="min-h-14 sm:min-h-16 px-3 sm:px-4 py-3 rounded-xl bg-teal-600 hover:bg-teal-500 active:bg-teal-700 text-white font-bold text-base sm:text-xl border-2 border-teal-300 flex items-center justify-center gap-1.5 sm:gap-2 focus-visible:outline-none focus-visible:ring-4 focus-visible:ring-amber-400 focus-visible:ring-offset-2 focus-visible:ring-offset-zinc-950 transition-colors"
             aria-label="Left Click"
           >
-            <span className="text-2xl" aria-hidden="true">
+            <span className="text-xl sm:text-2xl" aria-hidden="true">
               👆
             </span>
-            <span>كليك يسار (Left Click)</span>
+            <span>كليك يسار</span>
           </button>
 
           <button
             type="button"
             onClick={triggerDoubleClick}
-            className="min-h-16 px-6 py-4 rounded-xl bg-zinc-800 hover:bg-zinc-700 text-zinc-100 font-bold text-xl border-2 border-zinc-600 flex items-center justify-center gap-3 focus-visible:outline-none focus-visible:ring-4 focus-visible:ring-amber-400 focus-visible:ring-offset-2 focus-visible:ring-offset-zinc-950 transition-colors duration-150"
+            style={{ touchAction: 'manipulation' }}
+            className="min-h-14 sm:min-h-16 px-3 sm:px-4 py-3 rounded-xl bg-zinc-800 hover:bg-zinc-700 active:bg-zinc-600 text-zinc-100 font-bold text-base sm:text-xl border-2 border-zinc-600 flex items-center justify-center gap-1.5 sm:gap-2 focus-visible:outline-none focus-visible:ring-4 focus-visible:ring-amber-400 focus-visible:ring-offset-2 focus-visible:ring-offset-zinc-950 transition-colors"
             aria-label="Double Click"
           >
-            <span className="text-2xl" aria-hidden="true">
+            <span className="text-xl sm:text-2xl" aria-hidden="true">
               ✌️
             </span>
-            <span>دبل كليك (Double Click)</span>
+            <span>دبل كليك</span>
           </button>
 
           <button
             type="button"
             onClick={() => triggerClick('right')}
-            className="min-h-16 px-6 py-4 rounded-xl bg-zinc-800 hover:bg-zinc-700 text-zinc-100 font-bold text-xl border-2 border-zinc-600 flex items-center justify-center gap-3 focus-visible:outline-none focus-visible:ring-4 focus-visible:ring-amber-400 focus-visible:ring-offset-2 focus-visible:ring-offset-zinc-950 transition-colors duration-150"
+            style={{ touchAction: 'manipulation' }}
+            className="min-h-14 sm:min-h-16 px-3 sm:px-4 py-3 rounded-xl bg-zinc-800 hover:bg-zinc-700 active:bg-zinc-600 text-zinc-100 font-bold text-base sm:text-xl border-2 border-zinc-600 flex items-center justify-center gap-1.5 sm:gap-2 focus-visible:outline-none focus-visible:ring-4 focus-visible:ring-amber-400 focus-visible:ring-offset-2 focus-visible:ring-offset-zinc-950 transition-colors"
             aria-label="Right Click"
           >
-            <span className="text-2xl" aria-hidden="true">
+            <span className="text-xl sm:text-2xl" aria-hidden="true">
               👉
             </span>
-            <span>كليك يمين (Right Click)</span>
+            <span>كليك يمين</span>
           </button>
-        </div>
-      </section>
+        </section>
+      </div>
     </div>
   );
 }

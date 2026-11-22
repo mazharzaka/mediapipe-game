@@ -35,7 +35,11 @@ export function setupSocketHandler(io) {
       }
     });
 
-    // --- 2. Touchpad Events (Multi-Monitor Unbounded) ---
+    // --- 2. Touchpad Events (Multi-Monitor Unbounded & Coalesced) ---
+    socket.on("touchpad_start", async () => {
+      await nutService.syncTouchpadStart();
+    });
+
     socket.on("touchpad_move", async ({ dx, dy }) => {
       await nutService.moveDelta(dx, dy);
     });
@@ -49,6 +53,16 @@ export function setupSocketHandler(io) {
         await nutService.rightClick();
       } else {
         await nutService.leftClick();
+      }
+    });
+
+    socket.on("toggle_big_cursor", async ({ enable }) => {
+      try {
+        const result = await systemService.toggleBigCursor(enable);
+        io.emit("big_cursor_status", { enabled: result.enabled, size: result.size, success: true });
+        socket.emit("remote_feedback", { success: true, message: result.message });
+      } catch (err) {
+        socket.emit("remote_feedback", { success: false, error: err.message });
       }
     });
 
@@ -70,6 +84,43 @@ export function setupSocketHandler(io) {
       try {
         const result = await nutService.youtubeControl(action);
         socket.emit("remote_feedback", { success: true, action, result });
+      } catch (err) {
+        socket.emit("remote_feedback", { success: false, error: err.message });
+      }
+    });
+
+    socket.on("system_control", async ({ action }) => {
+      try {
+        let result;
+        if (action === "zoom_in") {
+          result = await nutService.zoomIn();
+        } else if (action === "zoom_out") {
+          result = await nutService.zoomOut();
+        } else if (action === "zoom_reset") {
+          result = await nutService.zoomReset();
+        } else if (action === "switch_window" || action === "alt_tab") {
+          result = await nutService.switchWindow();
+        } else if (action === "backspace") {
+          result = await nutService.backspace();
+        } else if (action === "enter") {
+          result = await nutService.pressEnterKey();
+        } else if (action === "browser_back") {
+          result = await nutService.browserBack();
+        } else if (action === "browser_forward") {
+          result = await nutService.browserForward();
+        } else {
+          throw new Error(`أمر نظام غير معروف: ${action}`);
+        }
+        socket.emit("remote_feedback", { success: true, action, message: result.message });
+      } catch (err) {
+        socket.emit("remote_feedback", { success: false, error: err.message });
+      }
+    });
+
+    socket.on("type_text", async ({ text, pressEnter }) => {
+      try {
+        const result = await nutService.typeText(text, pressEnter);
+        socket.emit("remote_feedback", { success: true, message: result.message });
       } catch (err) {
         socket.emit("remote_feedback", { success: false, error: err.message });
       }
