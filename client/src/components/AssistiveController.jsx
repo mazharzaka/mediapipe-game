@@ -2,6 +2,8 @@ import { useState, useEffect, useRef, useCallback } from 'react';
 import { Link } from 'react-router-dom';
 import { FilesetResolver, FaceLandmarker } from '@mediapipe/tasks-vision';
 import { socket, SERVER_URL } from '../socket';
+import RemoteVoiceController from './RemoteVoiceController';
+import TouchpadController from './TouchpadController';
 
 const WASM_URL = 'https://cdn.jsdelivr.net/npm/@mediapipe/tasks-vision@latest/wasm';
 const MODEL_URL =
@@ -9,12 +11,17 @@ const MODEL_URL =
 
 // Landmark index 1 is canonical Nose Tip in MediaPipe Face Mesh
 const NOSE_TIP_INDEX = 1;
-const THROTTLE_MS = 50; // Strict 50ms throttling (20 Hz) for mouse move
+const THROTTLE_MS = 20; // 20ms throttling (50 Hz) for high-speed responsiveness
 const SCROLL_THROTTLE_MS = 80; // 80ms throttle for scroll events
 const SCROLL_DEADZONE = 0.005; // Vertical deadzone for head tilt scroll
 const MAX_FREEZE_MS = 400; // Max freeze duration (400ms) to prevent mouse hang
+const NOSE_DEAD_ZONE = 0.005; // Dead zone threshold (anti-tremor stabilization over icons)
+const UPWARD_BOOST = 1.4; // 1.4x boost for upward head movement (dy < 0)
 
 export default function AssistiveController() {
+  // Navigation Tabs: 'touchpad' | 'remote' | 'face'
+  const [activeTab, setActiveTab] = useState('touchpad');
+
   const videoRef = useRef(null);
   const canvasRef = useRef(null);
 
@@ -28,15 +35,25 @@ export default function AssistiveController() {
   const [faceDetected, setFaceDetected] = useState(false);
   const [socketConnected, setSocketConnected] = useState(socket.connected);
 
-  // Active Zone & Ergonomics State
-  const [sensitivity, setSensitivity] = useState(2.5);
-  const sensitivityRef = useRef(2.5);
+  // Separated Sensitivities State (X default: 2.0, Y default: 3.5)
+  const [sensitivityX, setSensitivityX] = useState(2.0);
+  const sensitivityXRef = useRef(2.0);
+
+  const [sensitivityY, setSensitivityY] = useState(3.5);
+  const sensitivityYRef = useRef(3.5);
 
   const [centerPos, setCenterPos] = useState({ x: 0.5, y: 0.5 });
   const centerPosRef = useRef({ x: 0.5, y: 0.5 });
 
+  // Recenter countdown state (null or 3..2..1)
+  const [recenterCountdown, setRecenterCountdown] = useState(null);
+  const recenterTimerRef = useRef(null);
+
   // Latest raw mirrored nose position for recentering
   const latestRawNoseRef = useRef({ x: 0.5, y: 0.5 });
+
+  // Dead zone anchor for stabilizing cursor over icons
+  const lastNoseAnchorRef = useRef({ x: 0.5, y: 0.5 });
 
   // Smoothed coordinates via EMA (Exponential Moving Average)
   const smoothedPosRef = useRef({ x: 0.5, y: 0.5 });
@@ -46,6 +63,7 @@ export default function AssistiveController() {
   const [rawCoords, setRawCoords] = useState({ x: 0.5, y: 0.5 });
   const [packetsSent, setPacketsSent] = useState(0);
   const [recenterFeedback, setRecenterFeedback] = useState(false);
+  const [isUpwardActive, setIsUpwardActive] = useState(false);
 
   // Blendshapes & Gesture state
   const [gestureStatus, setGestureStatus] = useState('Standby');
@@ -81,12 +99,23 @@ export default function AssistiveController() {
   }, [isTracking]);
 
   useEffect(() => {
-    sensitivityRef.current = sensitivity;
-  }, [sensitivity]);
+    sensitivityXRef.current = sensitivityX;
+  }, [sensitivityX]);
+
+  useEffect(() => {
+    sensitivityYRef.current = sensitivityY;
+  }, [sensitivityY]);
 
   useEffect(() => {
     centerPosRef.current = centerPos;
   }, [centerPos]);
+
+  // Cleanup timers on unmount
+  useEffect(() => {
+    return () => {
+      if (recenterTimerRef.current) clearInterval(recenterTimerRef.current);
+    };
+  }, []);
 
   // Socket connection tracking
   useEffect(() => {
@@ -168,16 +197,42 @@ export default function AssistiveController() {
           latestRawNoseRef.current = { x: noseX, y: noseY };
           setRawCoords({ x: noseX, y: noseY });
 
-          // Active Zone Mapping from centerPos
-          const sens = sensitivityRef.current;
+          // 2. DEAD ZONE STABILIZATION OVER ICONS
+          const distFromAnchor = Math.hypot(
+            noseX - lastNoseAnchorRef.current.x,
+            noseY - lastNoseAnchorRef.current.y
+          );
+
+          let activeNoseX = noseX;
+          let activeNoseY = noseY;
+
+          if (distFromAnchor < NOSE_DEAD_ZONE) {
+            activeNoseX = lastNoseAnchorRef.current.x;
+            activeNoseY = lastNoseAnchorRef.current.y;
+          } else {
+            lastNoseAnchorRef.current = { x: noseX, y: noseY };
+          }
+
+          // 3. SEPARATED SENSITIVITIES & UPWARD BOOST MAPPING
+          const sensX = sensitivityXRef.current;
+          const sensY = sensitivityYRef.current;
           const center = centerPosRef.current;
-          const mappedX = 0.5 + (noseX - center.x) * sens;
-          const mappedY = 0.5 + (noseY - center.y) * sens;
+
+          const deltaX = activeNoseX - center.x;
+          const deltaY = activeNoseY - center.y;
+
+          // Upward Movement Check: noseY < center.y (deltaY < 0)
+          const upward = deltaY < 0;
+          setIsUpwardActive(upward);
+          const upwardMultiplier = upward ? UPWARD_BOOST : 1.0;
+
+          const mappedX = 0.5 + deltaX * sensX;
+          const mappedY = 0.5 + deltaY * sensY * upwardMultiplier;
 
           const clampedMappedX = Math.max(0, Math.min(1, mappedX));
           const clampedMappedY = Math.max(0, Math.min(1, mappedY));
 
-          // Simple Exponential Moving Average (EMA) smoothing
+          // 4. Simple Exponential Moving Average (EMA) smoothing
           const prev = smoothedPosRef.current;
           const smoothX = prev.x * 0.7 + clampedMappedX * 0.3;
           const smoothY = prev.y * 0.7 + clampedMappedY * 0.3;
@@ -185,16 +240,17 @@ export default function AssistiveController() {
           const finalX = Math.max(0, Math.min(1, smoothX));
           const finalY = Math.max(0, Math.min(1, smoothY));
 
-          // Draw high-contrast utilitarian overlays on canvas
+          // 5. Draw high-contrast utilitarian overlays on canvas
           if (canvas) {
             const ctx = canvas.getContext('2d');
             if (ctx) {
               const cw = canvas.width;
               const ch = canvas.height;
 
-              // Active Zone Box
-              const halfBoxW = (0.5 / sens) * cw;
-              const halfBoxH = (0.5 / sens) * ch;
+              // Asymmetric Active Zone Box (reflecting Upward Boost)
+              const halfBoxW = (0.5 / sensX) * cw;
+              const boxTopDist = (0.5 / (sensY * UPWARD_BOOST)) * ch;
+              const boxBottomDist = (0.5 / sensY) * ch;
               const boxCenterX = center.x * cw;
               const boxCenterY = center.y * ch;
 
@@ -203,9 +259,9 @@ export default function AssistiveController() {
               ctx.setLineDash([6, 6]);
               ctx.strokeRect(
                 boxCenterX - halfBoxW,
-                boxCenterY - halfBoxH,
+                boxCenterY - boxTopDist,
                 halfBoxW * 2,
-                halfBoxH * 2
+                boxTopDist + boxBottomDist
               );
               ctx.setLineDash([]);
 
@@ -216,8 +272,8 @@ export default function AssistiveController() {
               ctx.fill();
 
               // Nose Pointer Crosshair
-              const nosePxX = noseX * cw;
-              const nosePxY = noseY * ch;
+              const nosePxX = activeNoseX * cw;
+              const nosePxY = activeNoseY * ch;
 
               ctx.strokeStyle = isTrackingRef.current ? '#22C55E' : '#D97706';
               ctx.lineWidth = 3;
@@ -240,39 +296,36 @@ export default function AssistiveController() {
             }
           }
 
-          // 2. Gesture Evaluation with Mutual Exclusion, Edge Trigger & Max Freeze
+          // 6. Gesture Evaluation with Mutual Exclusion, Edge Trigger & Max Freeze
           const maxJawSide = Math.max(jawRight, jawLeft);
           const isScrollMode = jawOpen > 0.45;
           let currentStatus = isTrackingRef.current ? 'Tracking Active' : 'Standby';
 
           // --- MUTUAL EXCLUSION: Scroll Mode takes precedence ---
           if (isScrollMode) {
-            // When jawOpen > 0.45, clicks are completely disabled to avoid accidental triggers
             freezeStartTimeRef.current = 0; // Release any active freeze
 
             if (!isScrollModeRef.current || lastScrollNoseYRef.current === null) {
-              lastScrollNoseYRef.current = noseY;
+              lastScrollNoseYRef.current = activeNoseY;
               isScrollModeRef.current = true;
             }
 
-            const dy = noseY - lastScrollNoseYRef.current;
+            const dy = activeNoseY - lastScrollNoseYRef.current;
             if (timestamp - lastScrollTimeRef.current >= SCROLL_THROTTLE_MS) {
               if (dy < -SCROLL_DEADZONE) {
                 // Head tilted upward -> Scroll Up
-                console.log('[AssistiveController] Scroll UP, dy =', dy.toFixed(4));
                 if (isTrackingRef.current) {
                   socket.emit('mouse_scroll', { direction: 'up', dy, amount: 150 });
                 }
                 lastScrollTimeRef.current = timestamp;
-                lastScrollNoseYRef.current = noseY;
+                lastScrollNoseYRef.current = activeNoseY;
               } else if (dy > SCROLL_DEADZONE) {
                 // Head tilted downward -> Scroll Down
-                console.log('[AssistiveController] Scroll DOWN, dy =', dy.toFixed(4));
                 if (isTrackingRef.current) {
                   socket.emit('mouse_scroll', { direction: 'down', dy, amount: 150 });
                 }
                 lastScrollTimeRef.current = timestamp;
-                lastScrollNoseYRef.current = noseY;
+                lastScrollNoseYRef.current = activeNoseY;
               }
             }
 
@@ -283,7 +336,6 @@ export default function AssistiveController() {
             lastScrollNoseYRef.current = null;
 
             // --- HYSTERESIS & EDGE TRIGGER FOR CLICKS ---
-            // 1. Re-arm triggers only after values drop below 0.20
             if (browInnerUp < 0.20) {
               leftClickArmedRef.current = true;
             }
@@ -291,9 +343,8 @@ export default function AssistiveController() {
               rightClickArmedRef.current = true;
             }
 
-            // 2. Fire single-shot edge trigger on threshold crossing
             if (leftClickArmedRef.current && browInnerUp > 0.50) {
-              leftClickArmedRef.current = false; // Disarm until value falls below 0.20
+              leftClickArmedRef.current = false;
               clickFeedbackUntilRef.current = timestamp + 500;
               lastClickTypeRef.current = 'Left Click';
               console.log('[AssistiveController] Triggered Left Click (browInnerUp > 0.50)');
@@ -301,7 +352,7 @@ export default function AssistiveController() {
                 socket.emit('mouse_click', { button: 'left' });
               }
             } else if (rightClickArmedRef.current && maxJawSide > 0.45) {
-              rightClickArmedRef.current = false; // Disarm until value falls below 0.20
+              rightClickArmedRef.current = false;
               clickFeedbackUntilRef.current = timestamp + 500;
               lastClickTypeRef.current = 'Right Click';
               console.log('[AssistiveController] Triggered Right Click (maxJawSide > 0.45)');
@@ -322,19 +373,16 @@ export default function AssistiveController() {
               if (freezeElapsed <= MAX_FREEZE_MS) {
                 isFrozen = true;
               } else {
-                // Max freeze time exceeded -> auto unfreeze to prevent cursor hang
                 isFrozen = false;
               }
             } else {
-              // Reset freeze timer when gesture returns to rest
               freezeStartTimeRef.current = 0;
               isFrozen = false;
             }
 
-            // --- MOUSE MOVEMENT DISPATCH ---
+            // --- MOUSE MOVEMENT DISPATCH (50 Hz / 20ms Throttle) ---
             if (isFrozen) {
               currentStatus = 'Frozen';
-              // Cursor is anchored in place: do NOT emit movement to prevent drift
             } else {
               smoothedPosRef.current = { x: finalX, y: finalY };
               setCoords({ x: finalX, y: finalY });
@@ -443,18 +491,43 @@ export default function AssistiveController() {
     setIsTracking((prev) => !prev);
   }, []);
 
-  // Recenter: Save current nose coordinates as new centerPos
+  // Recenter with 3-Second Countdown
   const handleRecenter = useCallback(() => {
-    const current = latestRawNoseRef.current;
-    setCenterPos({ x: current.x, y: current.y });
-    smoothedPosRef.current = { x: 0.5, y: 0.5 };
-    setRecenterFeedback(true);
-    setTimeout(() => setRecenterFeedback(false), 1500);
-  }, []);
+    if (recenterCountdown !== null) return;
 
-  const changeSensitivity = (newVal) => {
+    let count = 3;
+    setRecenterCountdown(count);
+
+    if (recenterTimerRef.current) clearInterval(recenterTimerRef.current);
+
+    recenterTimerRef.current = setInterval(() => {
+      count -= 1;
+      if (count > 0) {
+        setRecenterCountdown(count);
+      } else {
+        clearInterval(recenterTimerRef.current);
+        recenterTimerRef.current = null;
+        setRecenterCountdown(null);
+
+        // Capture center position
+        const current = latestRawNoseRef.current;
+        setCenterPos({ x: current.x, y: current.y });
+        lastNoseAnchorRef.current = { x: current.x, y: current.y };
+        smoothedPosRef.current = { x: 0.5, y: 0.5 };
+        setRecenterFeedback(true);
+        setTimeout(() => setRecenterFeedback(false), 2000);
+      }
+    }, 1000);
+  }, [recenterCountdown]);
+
+  const changeSensitivityX = (newVal) => {
     const clamped = Math.max(1.0, Math.min(5.0, Math.round(newVal * 2) / 2));
-    setSensitivity(clamped);
+    setSensitivityX(clamped);
+  };
+
+  const changeSensitivityY = (newVal) => {
+    const clamped = Math.max(1.0, Math.min(6.0, Math.round(newVal * 2) / 2));
+    setSensitivityY(clamped);
   };
 
   // Helper for rendering high-contrast WCAG AAA Status Badge
@@ -495,7 +568,7 @@ export default function AssistiveController() {
   return (
     <main
       className="min-h-screen bg-zinc-950 text-zinc-50 p-4 sm:p-6 lg:p-8 flex flex-col gap-6 max-w-5xl mx-auto"
-      aria-label="Assistive Technology Mouse Controller"
+      aria-label="Assistive Technology Multi-Mode Controller"
     >
       {/* Top Header & Server Status */}
       <header className="flex flex-col sm:flex-row items-start sm:items-center justify-between gap-4 pb-4 border-b border-zinc-700">
@@ -509,11 +582,11 @@ export default function AssistiveController() {
               ← الرئيسية
             </Link>
             <h1 className="text-2xl sm:text-3xl font-bold tracking-tight text-zinc-50">
-              Assistive Head Controller
+              MediaPipe Assistive Suite
             </h1>
           </div>
           <p className="text-zinc-300 text-base sm:text-lg">
-            تحكم مريح بماوس الويندوز بحركة الأنف وتعبيرات الوجه — تقنية مساعدة معتمدة (WCAG AAA)
+            منظومة التحكم المساعدة بالرأس، الصوت وريموت الميديا (WCAG AAA)
           </p>
         </div>
 
@@ -524,9 +597,8 @@ export default function AssistiveController() {
           aria-live="polite"
         >
           <span
-            className={`inline-block w-3.5 h-3.5 rounded-full ${
-              socketConnected ? 'bg-green-500' : 'bg-red-500'
-            }`}
+            className={`inline-block w-3.5 h-3.5 rounded-full ${socketConnected ? 'bg-green-500' : 'bg-red-500'
+              }`}
             aria-hidden="true"
           />
           <span className="text-base font-semibold text-zinc-200">
@@ -535,367 +607,532 @@ export default function AssistiveController() {
         </div>
       </header>
 
-      {/* EMERGENCY SAFETY ACTION BUTTON (Largest, Most Accessible Target) */}
-      <section aria-label="Safety Tracking Control">
+      {/* MULTI-MODE TABS (Touchpad vs Remote & Voice vs Face Mode) */}
+      <div
+        className="grid grid-cols-1 sm:grid-cols-3 gap-3 p-1.5 bg-zinc-900 border-2 border-zinc-700 rounded-2xl w-full"
+        role="tablist"
+        aria-label="Assistive Controller Modes"
+      >
         <button
           type="button"
-          onClick={toggleTracking}
-          disabled={!isModelReady}
-          className={`w-full min-h-24 px-6 py-5 rounded-xl text-xl sm:text-2xl font-bold tracking-wide transition-colors duration-150 flex items-center justify-center gap-4 border-2 focus-visible:outline-none focus-visible:ring-4 focus-visible:ring-amber-400 focus-visible:ring-offset-4 focus-visible:ring-offset-zinc-950 disabled:opacity-50 disabled:cursor-not-allowed ${
-            isTracking
-              ? 'bg-red-600 hover:bg-red-500 text-white border-red-300 shadow-none'
-              : 'bg-teal-600 hover:bg-teal-500 text-white border-teal-300 shadow-none'
-          }`}
-          aria-pressed={isTracking}
-          aria-label={
-            isTracking
-              ? 'Safety Emergency Stop: Stop Tracking Mouse'
-              : 'Start Tracking: Begin Moving Mouse with Head'
-          }
+          role="tab"
+          id="tab-touchpad"
+          aria-controls="panel-touchpad"
+          aria-selected={activeTab === 'touchpad'}
+          onClick={() => setActiveTab('touchpad')}
+          className={`min-h-16 px-4 py-3 rounded-xl text-lg sm:text-xl font-bold flex items-center justify-center gap-2.5 transition-colors duration-150 border-2 focus-visible:outline-none focus-visible:ring-4 focus-visible:ring-amber-400 focus-visible:ring-offset-2 focus-visible:ring-offset-zinc-950 ${activeTab === 'touchpad'
+              ? 'bg-teal-600 text-white border-teal-300 shadow-none'
+              : 'bg-zinc-950 text-zinc-300 hover:text-white border-zinc-800 hover:border-zinc-600'
+            }`}
         >
-          {isTracking ? (
-            <>
-              <span className="text-3xl" aria-hidden="true">
-                ⏹
-              </span>
-              <span>EMERGENCY STOP / إيقاف الأمان الفوري (الماوس متصل)</span>
-            </>
-          ) : (
-            <>
-              <span className="text-3xl" aria-hidden="true">
-                ▶
-              </span>
-              <span>START TRACKING / بدء تتبع الرأس وتحريك الماوس</span>
-            </>
-          )}
+          <span aria-hidden="true" className="text-2xl">
+            🖱️
+          </span>
+          <span>التاتش باد (Touchpad)</span>
         </button>
-      </section>
 
-      {/* Main Grid: Ergonomics Controls & Telemetry + Camera Feed */}
-      <div className="grid grid-cols-1 lg:grid-cols-12 gap-6">
-        {/* Left Column: Ergonomics, Sensitivity Slider, Recenter & Telemetry */}
-        <section
-          className="lg:col-span-5 flex flex-col gap-6"
-          aria-label="Head Ergonomics and Telemetry"
+        <button
+          type="button"
+          role="tab"
+          id="tab-remote"
+          aria-controls="panel-remote"
+          aria-selected={activeTab === 'remote'}
+          onClick={() => setActiveTab('remote')}
+          className={`min-h-16 px-4 py-3 rounded-xl text-lg sm:text-xl font-bold flex items-center justify-center gap-2.5 transition-colors duration-150 border-2 focus-visible:outline-none focus-visible:ring-4 focus-visible:ring-amber-400 focus-visible:ring-offset-2 focus-visible:ring-offset-zinc-950 ${activeTab === 'remote'
+              ? 'bg-teal-600 text-white border-teal-300 shadow-none'
+              : 'bg-zinc-950 text-zinc-300 hover:text-white border-zinc-800 hover:border-zinc-600'
+            }`}
         >
-          {/* Recenter / ضبط المركز Button (Large, Highly Accessible) */}
-          <div className="p-6 rounded-xl bg-zinc-900 border border-zinc-700 flex flex-col gap-3">
-            <h2 className="text-xl font-bold text-zinc-50 border-b border-zinc-700 pb-2">
-              ضبط المركز والزاوية / Recenter
-            </h2>
-            <p className="text-base text-zinc-300 leading-relaxed">
-              ثبّت رأسك في الوضعية الأكثر راحة لك، ثم اضغط على الزر ليصبح موضع أنفك الحالي هو منتصف الشاشة.
-            </p>
+          <span aria-hidden="true" className="text-2xl">
+            🎛️
+          </span>
+          <span>الريموت والصوت (Remote)</span>
+        </button>
 
-            <button
-              type="button"
-              onClick={handleRecenter}
-              className={`w-full min-h-16 px-6 py-4 rounded-xl font-bold text-xl flex items-center justify-center gap-3 border-2 transition-colors duration-150 focus-visible:outline-none focus-visible:ring-4 focus-visible:ring-amber-400 focus-visible:ring-offset-2 focus-visible:ring-offset-zinc-950 ${
-                recenterFeedback
-                  ? 'bg-green-600 text-white border-green-300'
-                  : 'bg-amber-600 hover:bg-amber-500 text-white border-amber-300'
+        <button
+          type="button"
+          role="tab"
+          id="tab-face"
+          aria-controls="panel-face"
+          aria-selected={activeTab === 'face'}
+          onClick={() => setActiveTab('face')}
+          className={`min-h-16 px-4 py-3 rounded-xl text-lg sm:text-xl font-bold flex items-center justify-center gap-2.5 transition-colors duration-150 border-2 focus-visible:outline-none focus-visible:ring-4 focus-visible:ring-amber-400 focus-visible:ring-offset-2 focus-visible:ring-offset-zinc-950 ${activeTab === 'face'
+              ? 'bg-teal-600 text-white border-teal-300 shadow-none'
+              : 'bg-zinc-950 text-zinc-300 hover:text-white border-zinc-800 hover:border-zinc-600'
+            }`}
+        >
+          <span aria-hidden="true" className="text-2xl">
+            👤
+          </span>
+          <span>تحكم الوجه (Face Mode)</span>
+        </button>
+      </div>
+
+      {/* TAB PANEL 1: Touchpad Controller */}
+      {activeTab === 'touchpad' && (
+        <div id="panel-touchpad" role="tabpanel" aria-labelledby="tab-touchpad">
+          <TouchpadController />
+        </div>
+      )}
+
+      {/* TAB PANEL 2: Remote & Voice Controller */}
+      {activeTab === 'remote' && (
+        <div id="panel-remote" role="tabpanel" aria-labelledby="tab-remote">
+          <RemoteVoiceController />
+        </div>
+      )}
+
+      {/* TAB PANEL 2: Face Mode Controller (Kept in DOM with hidden class to preserve camera & model) */}
+      <div
+        id="panel-face"
+        role="tabpanel"
+        aria-labelledby="tab-face"
+        className={activeTab === 'face' ? 'flex flex-col gap-6' : 'hidden'}
+      >
+        {/* EMERGENCY SAFETY ACTION BUTTON */}
+        <section aria-label="Safety Tracking Control">
+          <button
+            type="button"
+            onClick={toggleTracking}
+            disabled={!isModelReady}
+            className={`w-full min-h-24 px-6 py-5 rounded-xl text-xl sm:text-2xl font-bold tracking-wide transition-colors duration-150 flex items-center justify-center gap-4 border-2 focus-visible:outline-none focus-visible:ring-4 focus-visible:ring-amber-400 focus-visible:ring-offset-4 focus-visible:ring-offset-zinc-950 disabled:opacity-50 disabled:cursor-not-allowed ${isTracking
+                ? 'bg-red-600 hover:bg-red-500 text-white border-red-300 shadow-none'
+                : 'bg-teal-600 hover:bg-teal-500 text-white border-teal-300 shadow-none'
               }`}
-              aria-label="Recenter current nose position as screen center"
-            >
-              <span className="text-2xl" aria-hidden="true">
-                🎯
-              </span>
-              <span>
-                {recenterFeedback
-                  ? 'تم ضبط المركز بنجاح! / Recentered'
-                  : 'Recenter / ضبط المركز'}
-              </span>
-            </button>
-          </div>
-
-          {/* Sensitivity Slider Control (1.0 to 5.0 in steps of 0.5) */}
-          <div className="p-6 rounded-xl bg-zinc-900 border border-zinc-700 flex flex-col gap-4">
-            <div className="flex items-center justify-between border-b border-zinc-700 pb-2">
-              <label
-                htmlFor="sensitivity-slider"
-                className="text-xl font-bold text-zinc-50"
-              >
-                التحكم في الحساسية / Sensitivity
-              </label>
-              <span className="font-mono text-2xl font-bold text-teal-400 px-3 py-1 rounded bg-zinc-950 border border-zinc-800">
-                {sensitivity.toFixed(1)}x
-              </span>
-            </div>
-
-            <p className="text-base text-zinc-300">
-              كلما زادت الحساسية، احتجت لحركة رأس أصغر للوصول لأطراف الشاشة.
-            </p>
-
-            <div className="flex flex-col gap-3">
-              <input
-                id="sensitivity-slider"
-                type="range"
-                min="1.0"
-                max="5.0"
-                step="0.5"
-                value={sensitivity}
-                onChange={(e) => changeSensitivity(parseFloat(e.target.value))}
-                className="w-full h-4 bg-zinc-950 border border-zinc-700 rounded-lg cursor-pointer accent-teal-500 focus-visible:outline-none focus-visible:ring-4 focus-visible:ring-amber-400 focus-visible:ring-offset-2 focus-visible:ring-offset-zinc-950"
-                aria-valuemin={1.0}
-                aria-valuemax={5.0}
-                aria-valuenow={sensitivity}
-                aria-valuetext={`${sensitivity.toFixed(1)} times sensitivity`}
-              />
-
-              <div className="flex justify-between text-sm font-mono text-zinc-400">
-                <span>1.0x (أوسع حركة)</span>
-                <span>2.5x (افتراضي متوازن)</span>
-                <span>5.0x (أدنى حركة)</span>
-              </div>
-            </div>
-
-            <div className="grid grid-cols-2 gap-3 pt-2">
-              <button
-                type="button"
-                onClick={() => changeSensitivity(sensitivity - 0.5)}
-                disabled={sensitivity <= 1.0}
-                className="min-h-14 px-4 py-2 rounded-lg bg-zinc-950 border border-zinc-700 hover:border-zinc-500 disabled:opacity-40 disabled:cursor-not-allowed font-bold text-lg text-zinc-100 flex items-center justify-center gap-2 focus-visible:outline-none focus-visible:ring-4 focus-visible:ring-amber-400 focus-visible:ring-offset-2 focus-visible:ring-offset-zinc-950 transition-colors duration-150"
-                aria-label="Decrease sensitivity by 0.5"
-              >
-                <span className="text-2xl" aria-hidden="true">
-                  −
+            aria-pressed={isTracking}
+            aria-label={
+              isTracking
+                ? 'Safety Emergency Stop: Stop Tracking Mouse'
+                : 'Start Tracking: Begin Moving Mouse with Head'
+            }
+          >
+            {isTracking ? (
+              <>
+                <span className="text-3xl" aria-hidden="true">
+                  ⏹
                 </span>
-                <span>تقليل الحساسية (-0.5)</span>
-              </button>
-
-              <button
-                type="button"
-                onClick={() => changeSensitivity(sensitivity + 0.5)}
-                disabled={sensitivity >= 5.0}
-                className="min-h-14 px-4 py-2 rounded-lg bg-zinc-950 border border-zinc-700 hover:border-zinc-500 disabled:opacity-40 disabled:cursor-not-allowed font-bold text-lg text-zinc-100 flex items-center justify-center gap-2 focus-visible:outline-none focus-visible:ring-4 focus-visible:ring-amber-400 focus-visible:ring-offset-2 focus-visible:ring-offset-zinc-950 transition-colors duration-150"
-                aria-label="Increase sensitivity by 0.5"
-              >
-                <span className="text-2xl" aria-hidden="true">
-                  +
+                <span>EMERGENCY STOP / إيقاف الأمان الفوري (الماوس متصل)</span>
+              </>
+            ) : (
+              <>
+                <span className="text-3xl" aria-hidden="true">
+                  ▶
                 </span>
-                <span>زيادة الحساسية (+0.5)</span>
-              </button>
-            </div>
-          </div>
-
-          {/* Telemetry & State Panel (Monospace WCAG AAA) */}
-          <div className="p-6 rounded-xl bg-zinc-900 border border-zinc-700 flex flex-col gap-4">
-            <h2 className="text-xl font-bold text-zinc-50 border-b border-zinc-700 pb-2">
-              مؤشرات الحركة النشطة / Live Telemetry
-            </h2>
-
-            {/* Output Coordinates (Smoothed & Clamped) */}
-            <div className="grid grid-cols-2 gap-4">
-              <div className="p-4 rounded-lg bg-zinc-950 border border-zinc-800">
-                <span className="text-sm font-semibold text-zinc-300 block mb-1">
-                  X (إحداثي الشاشة الأفقي)
-                </span>
-                <span className="font-mono text-2xl font-bold text-teal-400 block">
-                  {(coords.x * 100).toFixed(1)}%
-                </span>
-                <span className="font-mono text-xs text-zinc-400 block mt-1">
-                  Val: {coords.x.toFixed(4)}
-                </span>
-              </div>
-
-              <div className="p-4 rounded-lg bg-zinc-950 border border-zinc-800">
-                <span className="text-sm font-semibold text-zinc-300 block mb-1">
-                  Y (إحداثي الشاشة الرأسي)
-                </span>
-                <span className="font-mono text-2xl font-bold text-teal-400 block">
-                  {(coords.y * 100).toFixed(1)}%
-                </span>
-                <span className="font-mono text-xs text-zinc-400 block mt-1">
-                  Val: {coords.y.toFixed(4)}
-                </span>
-              </div>
-            </div>
-
-            {/* Face Expressions Live Blendshapes */}
-            <div className="p-4 rounded-lg bg-zinc-950 border border-zinc-800 flex flex-col gap-2 font-mono text-xs">
-              <span className="text-sm font-bold text-zinc-200 block mb-1">
-                تعبيرات الوجه النشطة / Live Blendshapes:
-              </span>
-              <div className="flex justify-between items-center">
-                <span>Brow Up (Left Click &gt;0.50, reset &lt;0.20):</span>
-                <span
-                  className={`font-bold ${
-                    blendshapesData.browInnerUp > 0.50
-                      ? 'text-teal-400'
-                      : blendshapesData.browInnerUp > 0.25
-                      ? 'text-amber-400'
-                      : 'text-zinc-400'
-                  }`}
-                >
-                  {(blendshapesData.browInnerUp * 100).toFixed(0)}%
-                </span>
-              </div>
-              <div className="flex justify-between items-center">
-                <span>Jaw Side (Right Click &gt;0.45, reset &lt;0.20):</span>
-                <span
-                  className={`font-bold ${
-                    Math.max(blendshapesData.jawRight, blendshapesData.jawLeft) > 0.45
-                      ? 'text-blue-400'
-                      : Math.max(blendshapesData.jawRight, blendshapesData.jawLeft) > 0.25
-                      ? 'text-amber-400'
-                      : 'text-zinc-400'
-                  }`}
-                >
-                  {(Math.max(blendshapesData.jawRight, blendshapesData.jawLeft) * 100).toFixed(0)}%
-                </span>
-              </div>
-              <div className="flex justify-between items-center">
-                <span>Jaw Open (Scroll Mode &gt;0.45):</span>
-                <span
-                  className={`font-bold ${
-                    blendshapesData.jawOpen > 0.45 ? 'text-purple-400' : 'text-zinc-400'
-                  }`}
-                >
-                  {(blendshapesData.jawOpen * 100).toFixed(0)}%
-                </span>
-              </div>
-            </div>
-
-            {/* Smoothing and Throttle Details */}
-            <div className="flex flex-col gap-1.5 text-base text-zinc-300 pt-2 border-t border-zinc-800 font-mono text-sm">
-              <div className="flex justify-between">
-                <span>Filter:</span>
-                <span className="text-zinc-100 font-bold">EMA Smoothing (70% / 30%)</span>
-              </div>
-              <div className="flex justify-between">
-                <span>Freeze Limit:</span>
-                <span className="text-zinc-100 font-bold">Max 400 ms (Auto-Unfreeze)</span>
-              </div>
-              <div className="flex justify-between">
-                <span>Active Center:</span>
-                <span className="text-amber-400 font-bold">
-                  {`X:${(centerPos.x * 100).toFixed(0)}% Y:${(centerPos.y * 100).toFixed(0)}%`}
-                </span>
-              </div>
-              <div className="flex justify-between">
-                <span>Raw Nose:</span>
-                <span className="text-zinc-300">
-                  {`X:${(rawCoords.x * 100).toFixed(0)}% Y:${(rawCoords.y * 100).toFixed(0)}%`}
-                </span>
-              </div>
-              <div className="flex justify-between">
-                <span>Throttle Rate:</span>
-                <span className="text-zinc-100 font-bold">50 ms (20 Hz)</span>
-              </div>
-              <div className="flex justify-between">
-                <span>Packets Sent:</span>
-                <span className="text-zinc-100 font-bold">{packetsSent}</span>
-              </div>
-              <div className="flex justify-between">
-                <span>Server Endpoint:</span>
-                <span className="text-zinc-400 text-xs truncate max-w-[200px]" title={SERVER_URL}>
-                  {SERVER_URL}
-                </span>
-              </div>
-            </div>
-          </div>
+                <span>START TRACKING / بدء تتبع الرأس وتحريك الماوس</span>
+              </>
+            )}
+          </button>
         </section>
 
-        {/* Right Column: Mirrored Video Camera Feed with Active Zone Box */}
-        <section
-          className="lg:col-span-7 flex flex-col gap-4"
-          aria-label="Camera Live Feed"
-        >
-          <div className="relative w-full aspect-4/3 bg-black rounded-xl border-2 border-zinc-700 overflow-hidden flex items-center justify-center">
-            {/* Mirrored video element */}
-            <video
-              ref={videoRef}
-              playsInline
-              muted
-              className="absolute inset-0 w-full h-full object-cover scale-x-[-1]"
-              aria-label="Mirrored Front Camera Feed"
-            />
+        {/* Main Grid: Ergonomics Controls & Telemetry + Camera Feed */}
+        <div className="grid grid-cols-1 lg:grid-cols-12 gap-6">
+          {/* Left Column: Ergonomics, Sensitivity Sliders, Recenter & Telemetry */}
+          <section
+            className="lg:col-span-5 flex flex-col gap-6"
+            aria-label="Head Ergonomics and Telemetry"
+          >
+            {/* Recenter / ضبط المركز Button with 3-Second Countdown */}
+            <div className="p-6 rounded-xl bg-zinc-900 border border-zinc-700 flex flex-col gap-3">
+              <h2 className="text-xl font-bold text-zinc-50 border-b border-zinc-700 pb-2 flex items-center justify-between">
+                <span>ضبط المركز والزاوية / Recenter</span>
+                {recenterCountdown !== null && (
+                  <span className="text-sm font-mono px-2.5 py-1 rounded bg-amber-600 text-white font-bold">
+                    {recenterCountdown}s
+                  </span>
+                )}
+              </h2>
+              <p className="text-base text-zinc-300 leading-relaxed">
+                عند الضغط، يبدأ عد تنازلي مدته <strong>3 ثوانٍ</strong> يتيح لك النظر لمنتصف شاشة اللابتوب بوضعية مريحة قبل حفظ المركز.
+              </p>
 
-            {/* Overlays: Active Zone Box, Center Target, and Crosshair */}
-            <canvas
-              ref={canvasRef}
-              width={640}
-              height={480}
-              className="absolute inset-0 w-full h-full pointer-events-none z-10"
-              aria-hidden="true"
-            />
-
-            {/* Model status overlay during loading */}
-            {!isModelReady && (
-              <div
-                className="absolute inset-0 bg-zinc-950/90 flex flex-col items-center justify-center p-6 text-center z-20"
-                role="status"
+              <button
+                type="button"
+                onClick={handleRecenter}
+                disabled={recenterCountdown !== null}
+                className={`w-full min-h-16 px-6 py-4 rounded-xl font-bold text-xl flex items-center justify-center gap-3 border-2 transition-colors duration-150 focus-visible:outline-none focus-visible:ring-4 focus-visible:ring-amber-400 focus-visible:ring-offset-2 focus-visible:ring-offset-zinc-950 disabled:cursor-not-allowed ${recenterCountdown !== null
+                    ? 'bg-amber-600 text-white border-amber-300 animate-pulse'
+                    : recenterFeedback
+                      ? 'bg-green-600 text-white border-green-300'
+                      : 'bg-zinc-800 hover:bg-zinc-700 text-white border-zinc-600 hover:border-zinc-500'
+                  }`}
+                aria-label="Recenter current nose position as screen center with 3 second countdown"
               >
-                <div
-                  className="w-10 h-10 border-4 border-teal-500 border-t-transparent rounded-full animate-spin mb-4"
-                  aria-hidden="true"
-                />
-                <p className="text-xl font-bold text-zinc-50">{modelStatus}</p>
-                <p className="text-base text-zinc-300 mt-2">
-                  يرجى السماح بصلاحية الكاميرا لتمكين التتبع
+                <span className="text-2xl" aria-hidden="true">
+                  {recenterCountdown !== null ? '⏱' : recenterFeedback ? '✓' : '🎯'}
+                </span>
+                <span>
+                  {recenterCountdown !== null
+                    ? `جاري الضبط خلال: ${recenterCountdown}.. (ثبّت رأسك في المنتصف)`
+                    : recenterFeedback
+                      ? 'تم ضبط المركز بنجاح! / Recentered'
+                      : 'Recenter / ضبط المركز (عد تنازلي 3 ثوانٍ)'}
+                </span>
+              </button>
+            </div>
+
+            {/* Separated Sensitivities (X & Y) + Upward Boost */}
+            <div className="p-6 rounded-xl bg-zinc-900 border border-zinc-700 flex flex-col gap-5">
+              <div className="border-b border-zinc-700 pb-2">
+                <h2 className="text-xl font-bold text-zinc-50">
+                  التحكم في الحساسية / Sensitivity (X & Y)
+                </h2>
+                <p className="text-sm text-zinc-300 mt-1">
+                  حساسية منفصلة للأفقي والرأسي مع تعزيز إضافي للحركة لأعلى (+40%).
                 </p>
               </div>
-            )}
 
-            {/* TOP BAR BADGES: Gesture Status Badge & Face Locked Badge */}
-            <div className="absolute top-3 left-3 right-3 z-20 flex items-center justify-between pointer-events-none">
-              {/* Dynamic Gesture / Status Badge */}
-              <div
-                className={`px-3.5 py-1.5 rounded-lg text-sm sm:text-base font-bold flex items-center gap-2 shadow-sm ${getBadgeStyle()}`}
-                role="status"
-                aria-live="polite"
-              >
-                <span aria-hidden="true" className="text-base">
-                  {getBadgeIcon()}
+              {/* Horizontal Sensitivity (X) */}
+              <div className="flex flex-col gap-3">
+                <div className="flex items-center justify-between">
+                  <label
+                    htmlFor="sensitivity-x-slider"
+                    className="text-base font-bold text-zinc-200"
+                  >
+                    الحساسية الأفقية / X Sensitivity:
+                  </label>
+                  <span className="font-mono text-xl font-bold text-teal-400 px-2.5 py-0.5 rounded bg-zinc-950 border border-zinc-800">
+                    {sensitivityX.toFixed(1)}x
+                  </span>
+                </div>
+
+                <input
+                  id="sensitivity-x-slider"
+                  type="range"
+                  min="1.0"
+                  max="5.0"
+                  step="0.5"
+                  value={sensitivityX}
+                  onChange={(e) => changeSensitivityX(parseFloat(e.target.value))}
+                  className="w-full h-3 bg-zinc-950 border border-zinc-700 rounded-lg cursor-pointer accent-teal-500 focus-visible:outline-none focus-visible:ring-4 focus-visible:ring-amber-400 focus-visible:ring-offset-2 focus-visible:ring-offset-zinc-950"
+                  aria-valuemin={1.0}
+                  aria-valuemax={5.0}
+                  aria-valuenow={sensitivityX}
+                  aria-valuetext={`Horizontal sensitivity ${sensitivityX.toFixed(1)}x`}
+                />
+
+                <div className="grid grid-cols-2 gap-2">
+                  <button
+                    type="button"
+                    onClick={() => changeSensitivityX(sensitivityX - 0.5)}
+                    disabled={sensitivityX <= 1.0}
+                    className="min-h-12 px-3 py-1.5 rounded-lg bg-zinc-950 border border-zinc-700 hover:border-zinc-500 disabled:opacity-40 disabled:cursor-not-allowed font-bold text-base text-zinc-200 flex items-center justify-center gap-1.5 focus-visible:outline-none focus-visible:ring-4 focus-visible:ring-amber-400"
+                  >
+                    <span>−</span>
+                    <span>تقليل X (-0.5)</span>
+                  </button>
+                  <button
+                    type="button"
+                    onClick={() => changeSensitivityX(sensitivityX + 0.5)}
+                    disabled={sensitivityX >= 5.0}
+                    className="min-h-12 px-3 py-1.5 rounded-lg bg-zinc-950 border border-zinc-700 hover:border-zinc-500 disabled:opacity-40 disabled:cursor-not-allowed font-bold text-base text-zinc-200 flex items-center justify-center gap-1.5 focus-visible:outline-none focus-visible:ring-4 focus-visible:ring-amber-400"
+                  >
+                    <span>+</span>
+                    <span>زيادة X (+0.5)</span>
+                  </button>
+                </div>
+              </div>
+
+              {/* Vertical Sensitivity (Y) + Upward Boost Indicator */}
+              <div className="flex flex-col gap-3 pt-3 border-t border-zinc-800">
+                <div className="flex items-center justify-between">
+                  <div className="flex items-center gap-2">
+                    <label
+                      htmlFor="sensitivity-y-slider"
+                      className="text-base font-bold text-zinc-200"
+                    >
+                      الحساسية الرأسية / Y Sensitivity:
+                    </label>
+                    <span
+                      className={`text-xs font-bold px-2 py-0.5 rounded border ${isUpwardActive
+                          ? 'bg-amber-600/30 border-amber-400 text-amber-300'
+                          : 'bg-zinc-800 border-zinc-700 text-zinc-400'
+                        }`}
+                      title="Upward Boost: 1.4x active when looking upward"
+                    >
+                      ▲ Upward Boost 1.4x
+                    </span>
+                  </div>
+                  <span className="font-mono text-xl font-bold text-teal-400 px-2.5 py-0.5 rounded bg-zinc-950 border border-zinc-800">
+                    {sensitivityY.toFixed(1)}x
+                  </span>
+                </div>
+
+                <input
+                  id="sensitivity-y-slider"
+                  type="range"
+                  min="1.0"
+                  max="6.0"
+                  step="0.5"
+                  value={sensitivityY}
+                  onChange={(e) => changeSensitivityY(parseFloat(e.target.value))}
+                  className="w-full h-3 bg-zinc-950 border border-zinc-700 rounded-lg cursor-pointer accent-teal-500 focus-visible:outline-none focus-visible:ring-4 focus-visible:ring-amber-400 focus-visible:ring-offset-2 focus-visible:ring-offset-zinc-950"
+                  aria-valuemin={1.0}
+                  aria-valuemax={6.0}
+                  aria-valuenow={sensitivityY}
+                  aria-valuetext={`Vertical sensitivity ${sensitivityY.toFixed(1)}x with 1.4x upward boost`}
+                />
+
+                <div className="grid grid-cols-2 gap-2">
+                  <button
+                    type="button"
+                    onClick={() => changeSensitivityY(sensitivityY - 0.5)}
+                    disabled={sensitivityY <= 1.0}
+                    className="min-h-12 px-3 py-1.5 rounded-lg bg-zinc-950 border border-zinc-700 hover:border-zinc-500 disabled:opacity-40 disabled:cursor-not-allowed font-bold text-base text-zinc-200 flex items-center justify-center gap-1.5 focus-visible:outline-none focus-visible:ring-4 focus-visible:ring-amber-400"
+                  >
+                    <span>−</span>
+                    <span>تقليل Y (-0.5)</span>
+                  </button>
+                  <button
+                    type="button"
+                    onClick={() => changeSensitivityY(sensitivityY + 0.5)}
+                    disabled={sensitivityY >= 6.0}
+                    className="min-h-12 px-3 py-1.5 rounded-lg bg-zinc-950 border border-zinc-700 hover:border-zinc-500 disabled:opacity-40 disabled:cursor-not-allowed font-bold text-base text-zinc-200 flex items-center justify-center gap-1.5 focus-visible:outline-none focus-visible:ring-4 focus-visible:ring-amber-400"
+                  >
+                    <span>+</span>
+                    <span>زيادة Y (+0.5)</span>
+                  </button>
+                </div>
+              </div>
+            </div>
+
+            {/* Telemetry & State Panel (Monospace WCAG AAA) */}
+            <div className="p-6 rounded-xl bg-zinc-900 border border-zinc-700 flex flex-col gap-4">
+              <h2 className="text-xl font-bold text-zinc-50 border-b border-zinc-700 pb-2">
+                مؤشرات الحركة النشطة / Live Telemetry
+              </h2>
+
+              {/* Output Coordinates (Smoothed & Clamped) */}
+              <div className="grid grid-cols-2 gap-4">
+                <div className="p-4 rounded-lg bg-zinc-950 border border-zinc-800">
+                  <span className="text-sm font-semibold text-zinc-300 block mb-1">
+                    X (إحداثي الشاشة الأفقي)
+                  </span>
+                  <span className="font-mono text-2xl font-bold text-teal-400 block">
+                    {(coords.x * 100).toFixed(1)}%
+                  </span>
+                  <span className="font-mono text-xs text-zinc-400 block mt-1">
+                    Val: {coords.x.toFixed(4)}
+                  </span>
+                </div>
+
+                <div className="p-4 rounded-lg bg-zinc-950 border border-zinc-800">
+                  <span className="text-sm font-semibold text-zinc-300 block mb-1">
+                    Y (إحداثي الشاشة الرأسي)
+                  </span>
+                  <span className="font-mono text-2xl font-bold text-teal-400 block">
+                    {(coords.y * 100).toFixed(1)}%
+                  </span>
+                  <span className="font-mono text-xs text-zinc-400 block mt-1">
+                    Val: {coords.y.toFixed(4)}
+                  </span>
+                </div>
+              </div>
+
+              {/* Face Expressions Live Blendshapes */}
+              <div className="p-4 rounded-lg bg-zinc-950 border border-zinc-800 flex flex-col gap-2 font-mono text-xs">
+                <span className="text-sm font-bold text-zinc-200 block mb-1">
+                  تعبيرات الوجه النشطة / Live Blendshapes:
                 </span>
-                <span>{gestureStatus}</span>
+                <div className="flex justify-between items-center">
+                  <span>Brow Up (Left Click &gt;0.50, reset &lt;0.20):</span>
+                  <span
+                    className={`font-bold ${blendshapesData.browInnerUp > 0.50
+                        ? 'text-teal-400'
+                        : blendshapesData.browInnerUp > 0.25
+                          ? 'text-amber-400'
+                          : 'text-zinc-400'
+                      }`}
+                  >
+                    {(blendshapesData.browInnerUp * 100).toFixed(0)}%
+                  </span>
+                </div>
+                <div className="flex justify-between items-center">
+                  <span>Jaw Side (Right Click &gt;0.45, reset &lt;0.20):</span>
+                  <span
+                    className={`font-bold ${Math.max(blendshapesData.jawRight, blendshapesData.jawLeft) > 0.45
+                        ? 'text-blue-400'
+                        : Math.max(blendshapesData.jawRight, blendshapesData.jawLeft) > 0.25
+                          ? 'text-amber-400'
+                          : 'text-zinc-400'
+                      }`}
+                  >
+                    {(Math.max(blendshapesData.jawRight, blendshapesData.jawLeft) * 100).toFixed(0)}%
+                  </span>
+                </div>
+                <div className="flex justify-between items-center">
+                  <span>Jaw Open (Scroll Mode &gt;0.45):</span>
+                  <span
+                    className={`font-bold ${blendshapesData.jawOpen > 0.45 ? 'text-purple-400' : 'text-zinc-400'
+                      }`}
+                  >
+                    {(blendshapesData.jawOpen * 100).toFixed(0)}%
+                  </span>
+                </div>
               </div>
 
-              {/* Face Locked Status Badge */}
-              <div
-                className={`px-3 py-1.5 rounded-lg border text-sm font-bold flex items-center gap-2 ${
-                  faceDetected
-                    ? 'bg-zinc-900/90 border-green-500 text-green-400'
-                    : 'bg-zinc-900/90 border-amber-500 text-amber-300'
-                }`}
-              >
-                <span aria-hidden="true">{faceDetected ? '●' : '■'}</span>
-                <span>{faceDetected ? 'Face Locked' : 'Searching Face'}</span>
+              {/* Smoothing and Throttle Details */}
+              <div className="flex flex-col gap-1.5 text-base text-zinc-300 pt-2 border-t border-zinc-800 font-mono text-sm">
+                <div className="flex justify-between">
+                  <span>Filter / Smoothing:</span>
+                  <span className="text-zinc-100 font-bold">EMA (70/30) + DeadZone (0.005)</span>
+                </div>
+                <div className="flex justify-between">
+                  <span>Throttle Rate:</span>
+                  <span className="text-teal-400 font-bold">20 ms (50 Hz Ultra-Smooth)</span>
+                </div>
+                <div className="flex justify-between">
+                  <span>Upward Boost:</span>
+                  <span className="text-amber-400 font-bold">1.4x (dy &lt; 0)</span>
+                </div>
+                <div className="flex justify-between">
+                  <span>Freeze Limit:</span>
+                  <span className="text-zinc-100 font-bold">Max 400 ms (Auto-Unfreeze)</span>
+                </div>
+                <div className="flex justify-between">
+                  <span>Active Center:</span>
+                  <span className="text-amber-400 font-bold">
+                    {`X:${(centerPos.x * 100).toFixed(0)}% Y:${(centerPos.y * 100).toFixed(0)}%`}
+                  </span>
+                </div>
+                <div className="flex justify-between">
+                  <span>Raw Nose:</span>
+                  <span className="text-zinc-300">
+                    {`X:${(rawCoords.x * 100).toFixed(0)}% Y:${(rawCoords.y * 100).toFixed(0)}%`}
+                  </span>
+                </div>
+                <div className="flex justify-between">
+                  <span>Packets Sent:</span>
+                  <span className="text-zinc-100 font-bold">{packetsSent}</span>
+                </div>
+                <div className="flex justify-between">
+                  <span>Server Endpoint:</span>
+                  <span className="text-zinc-400 text-xs truncate max-w-[200px]" title={SERVER_URL}>
+                    {SERVER_URL}
+                  </span>
+                </div>
+              </div>
+            </div>
+          </section>
+
+          {/* Right Column: Mirrored Video Camera Feed with Active Zone Box */}
+          <section
+            className="lg:col-span-7 flex flex-col gap-4"
+            aria-label="Camera Live Feed"
+          >
+            <div className="relative w-full aspect-4/3 bg-black rounded-xl border-2 border-zinc-700 overflow-hidden flex items-center justify-center">
+              {/* Mirrored video element */}
+              <video
+                ref={videoRef}
+                playsInline
+                muted
+                className="absolute inset-0 w-full h-full object-cover scale-x-[-1]"
+                aria-label="Mirrored Front Camera Feed"
+              />
+
+              {/* Overlays: Active Zone Box, Center Target, and Crosshair */}
+              <canvas
+                ref={canvasRef}
+                width={640}
+                height={480}
+                className="absolute inset-0 w-full h-full pointer-events-none z-10"
+                aria-hidden="true"
+              />
+
+              {/* Model status overlay during loading */}
+              {!isModelReady && (
+                <div
+                  className="absolute inset-0 bg-zinc-950/90 flex flex-col items-center justify-center p-6 text-center z-20"
+                  role="status"
+                >
+                  <div
+                    className="w-10 h-10 border-4 border-teal-500 border-t-transparent rounded-full animate-spin mb-4"
+                    aria-hidden="true"
+                  />
+                  <p className="text-xl font-bold text-zinc-50">{modelStatus}</p>
+                  <p className="text-base text-zinc-300 mt-2">
+                    يرجى السماح بصلاحية الكاميرا لتمكين التتبع
+                  </p>
+                </div>
+              )}
+
+              {/* Recenter 3-Second Visual Countdown Banner on Video */}
+              {recenterCountdown !== null && (
+                <div
+                  className="absolute inset-0 bg-zinc-950/80 flex flex-col items-center justify-center p-6 text-center z-30"
+                  role="status"
+                  aria-live="assertive"
+                >
+                  <div className="font-mono text-7xl font-extrabold text-amber-400 mb-3 animate-bounce">
+                    {recenterCountdown}
+                  </div>
+                  <p className="text-2xl font-bold text-zinc-50">
+                    انظر إلى منتصف شاشة اللابتوب بوضعية مريحة
+                  </p>
+                  <p className="text-base text-zinc-300 mt-2">
+                    جاري تسجيل نقطة الصفر بعد انتهاء العد التنازلي...
+                  </p>
+                </div>
+              )}
+
+              {/* TOP BAR BADGES: Gesture Status Badge & Face Locked Badge */}
+              <div className="absolute top-3 left-3 right-3 z-20 flex items-center justify-between pointer-events-none">
+                {/* Dynamic Gesture / Status Badge */}
+                <div
+                  className={`px-3.5 py-1.5 rounded-lg text-sm sm:text-base font-bold flex items-center gap-2 shadow-sm ${getBadgeStyle()}`}
+                  role="status"
+                  aria-live="polite"
+                >
+                  <span aria-hidden="true" className="text-base">
+                    {getBadgeIcon()}
+                  </span>
+                  <span>{gestureStatus}</span>
+                </div>
+
+                {/* Face Locked Status Badge */}
+                <div
+                  className={`px-3 py-1.5 rounded-lg border text-sm font-bold flex items-center gap-2 ${faceDetected
+                      ? 'bg-zinc-900/90 border-green-500 text-green-400'
+                      : 'bg-zinc-900/90 border-amber-500 text-amber-300'
+                    }`}
+                >
+                  <span aria-hidden="true">{faceDetected ? '●' : '■'}</span>
+                  <span>{faceDetected ? 'Face Locked' : 'Searching Face'}</span>
+                </div>
+              </div>
+
+              {/* Badges on bottom of video container */}
+              <div className="absolute bottom-3 left-3 z-20 flex gap-2">
+                <span className="px-3 py-1.5 rounded-md bg-zinc-900/90 border border-zinc-700 text-zinc-200 text-sm font-semibold">
+                  مرآة الكاميرا الأمامية
+                </span>
+                <span className="px-3 py-1.5 rounded-md bg-zinc-900/90 border border-zinc-700 text-amber-300 text-sm font-semibold">
+                  المستطيل المنقط = نطاق التحكم النشط
+                </span>
               </div>
             </div>
 
-            {/* Badges on bottom of video container */}
-            <div className="absolute bottom-3 left-3 z-20 flex gap-2">
-              <span className="px-3 py-1.5 rounded-md bg-zinc-900/90 border border-zinc-700 text-zinc-200 text-sm font-semibold">
-                مرآة الكاميرا الأمامية
-              </span>
-              <span className="px-3 py-1.5 rounded-md bg-zinc-900/90 border border-zinc-700 text-amber-300 text-sm font-semibold">
-                المستطيل المنقط = نطاق التحكم النشط
-              </span>
+            {/* Utilitarian Instructions Callout (Face Gestures) */}
+            <div className="p-4 rounded-xl bg-zinc-900 border border-zinc-700 text-zinc-300 text-base leading-relaxed space-y-2">
+              <p className="font-bold text-zinc-50">
+                💡 إرشادات الراحة والوصول السهل:
+              </p>
+              <ul className="list-disc list-inside space-y-1.5 pr-2">
+                <li>
+                  <strong>عد تنازلي لضبط المركز:</strong> اضغط على <em>Recenter</em> وسيبدأ عد تنازلي 3 ثوانٍ يمنحك وقتاً لتثبيت رأسك والنظر لمنتصف الشاشة قبل الحفظ.
+                </li>
+                <li>
+                  <strong>تعزيز الحركة لأعلى (Upward Boost 1.4x):</strong> مضاعفة الحركة الرأسية عند النظر لأعلى لتمكينك من الوصول لشريط العنوان والتبويبات بأقل جهد لعضلات الرقبة.
+                </li>
+                <li>
+                  <strong>تثبيت المؤشر على الأيقونات (Dead Zone):</strong> يتم تجاهل الرعشات الطفيفة (&lt; 0.005) تماماً ليبقى الماوس ثابتاً فوق أي ملف أو زر دون حركة غير مقصودة.
+                </li>
+                <li>
+                  <strong>سرعة استجابة فائقة (50 Hz):</strong> تم تسريع تحديث الإحداثيات إلى 20ms لتجربة حركة سلسة وطبيعية تشبه ماوس اليد الحقيقي.
+                </li>
+              </ul>
             </div>
-          </div>
-
-          {/* Utilitarian Instructions Callout (Face Gestures) */}
-          <div className="p-4 rounded-xl bg-zinc-900 border border-zinc-700 text-zinc-300 text-base leading-relaxed space-y-2">
-            <p className="font-bold text-zinc-50">
-              💡 إرشادات التحكم بالإيماءات وتعبيرات الوجه:
-            </p>
-            <ul className="list-disc list-inside space-y-1.5 pr-2">
-              <li>
-                <strong>Left Click (نقرة يسار):</strong> ارفع حاجبيك لأعلى (&gt; 50%) لإرسال نقرة واحدة؛ وأنزل حاجبيك (&lt; 20%) لتجهيز النقرة التالية (Hysteresis).
-              </li>
-              <li>
-                <strong>Right Click (نقرة يمين):</strong> حرّك فكك للجانب (&gt; 45%) لإرسال نقرة يمين؛ وأعده للمنتصف (&lt; 20%) لتجهيز النقرة التالية.
-              </li>
-              <li>
-                <strong>Scroll Mode (وضع التمرير):</strong> افتح فمك (&gt; 45%) وحرّك رأسك لأعلى أو لأسفل للتمرير. تُعطّل النقرات تلقائياً أثناء فتح الفم لمنع أي ضغط بالخطأ.
-              </li>
-              <li>
-                <strong>Freeze-on-Gesture (تثبيت المؤشر الذكي):</strong> يتجمد المؤشر لحظة الإيماءة بحد أقصى 400ms لتثبيت الموضع، ثم يفك التجميد تلقائياً حتى لا يعلق الماوس.
-              </li>
-            </ul>
-          </div>
-        </section>
+          </section>
+        </div>
       </div>
     </main>
   );
