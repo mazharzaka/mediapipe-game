@@ -2,9 +2,7 @@
 // Safe Focus Mode: When Ctrl+Shift+X is triggered during an ad, focuses the Skip Ad button inside .video-ads.
 // The host server (nut-js) follows up 150ms later with a physical Key.Enter (isTrusted: true).
 (() => {
-  console.log(
-    "[Assistive Ad Skipper] Extension active on YouTube (Focus + Enter mode).",
-  );
+  console.log('[Assistive Ad Skipper] Extension active on YouTube (Focus + Enter mode).');
 
   const SKIP_SELECTORS = [
     ".ytp-skip-ad-button",
@@ -24,7 +22,7 @@
    * Corner Toast notification to verify signal reception from mobile
    */
   function showCornerToast(text, durationMs = 1000) {
-    let toast = document.getElementById("assistive-corner-toast");
+    let toast = document.getElementById('assistive-corner-toast');
     if (!toast) {
       toast = document.createElement("div");
       toast.id = "assistive-corner-toast";
@@ -60,18 +58,16 @@
    */
   function focusSkipButton() {
     // 1. Verify that an ad is actually active on the player
-    const adPlayer = document.querySelector(
-      ".html5-video-player.ad-showing, .ad-showing, .ad-interrupting",
-    );
+    const adPlayer = document.querySelector('.html5-video-player.ad-showing, .ad-showing, .ad-interrupting');
     if (!adPlayer) {
-      showCornerToast("No Ad Playing", 1000);
+      showCornerToast('No Ad Playing', 1000);
       return false;
     }
 
     // 2. Search strictly inside .video-ads
-    const videoAdsContainer = document.querySelector(".video-ads");
+    const videoAdsContainer = document.querySelector('.video-ads');
     if (!videoAdsContainer) {
-      showCornerToast("No Ad Playing", 1000);
+      showCornerToast('No Ad Playing', 1000);
       return false;
     }
 
@@ -88,20 +84,16 @@
 
     // Fallback: search buttons inside .video-ads containing "Skip" or "تخطي"
     if (!targetBtn) {
-      const adButtons = videoAdsContainer.querySelectorAll("button");
+      const adButtons = videoAdsContainer.querySelectorAll('button');
       for (const btn of adButtons) {
         if (btn && btn.offsetParent !== null) {
-          const text = (btn.innerText || btn.textContent || "")
-            .trim()
-            .toLowerCase();
-          const ariaLabel = (
-            btn.getAttribute("aria-label") || ""
-          ).toLowerCase();
+          const text = (btn.innerText || btn.textContent || '').trim().toLowerCase();
+          const ariaLabel = (btn.getAttribute('aria-label') || '').toLowerCase();
           if (
-            text.includes("skip") ||
-            text.includes("تخطي") ||
-            ariaLabel.includes("skip") ||
-            ariaLabel.includes("تخطي")
+            text.includes('skip') ||
+            text.includes('تخطي') ||
+            ariaLabel.includes('skip') ||
+            ariaLabel.includes('تخطي')
           ) {
             targetBtn = btn;
             break;
@@ -110,13 +102,13 @@
       }
     }
 
-    if (targetBtn && typeof targetBtn.focus === "function") {
+    if (targetBtn && typeof targetBtn.focus === 'function') {
       targetBtn.focus();
-      showCornerToast("✓ Skip Ad Focused", 1200);
-      console.log("[Assistive Ad Skipper] Focused skip button:", targetBtn);
+      showCornerToast('✓ Skip Ad Focused', 1200);
+      console.log('[Assistive Ad Skipper] Focused skip button:', targetBtn);
       return true;
     } else {
-      showCornerToast("Ad Playing (Skip button not ready yet)", 1200);
+      showCornerToast('Ad Playing (Skip button not ready yet)', 1200);
       return false;
     }
   }
