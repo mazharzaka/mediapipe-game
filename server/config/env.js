@@ -18,8 +18,11 @@ export const env = {
     process.env.GEMINI_API_KEY ||
     ""
   ).trim(),
-  GEMINI_MODEL: process.env.GEMINI_MODEL || "gemini-3.8-flash",
+  GEMINI_MODEL: (process.env.GEMINI_MODEL || "gemini-3.8-flash").trim(),
 };
+
+// Alias for convenience
+export const geminiModel = env.GEMINI_MODEL;
 
 export function isAiConfigured() {
   return Boolean(

@@ -328,6 +328,72 @@ export async function zoomReset() {
 }
 
 /**
+ * Windows Magnifier Lens Mode Controls
+ * Launches and controls the native floating square magnifier lens for 5-6m viewing
+ */
+export async function openLens() {
+  try {
+    // 1. Press Win + Equal to start Windows Magnifier
+    await keyboard.pressKey(Key.LeftSuper, Key.Equal);
+    await keyboard.releaseKey(Key.LeftSuper, Key.Equal);
+
+    // 2. Wait 400ms for Magnifier to initialize
+    await new Promise((resolve) => setTimeout(resolve, 400));
+
+    // 3. Switch to Lens Mode (Ctrl + Alt + L)
+    await keyboard.pressKey(Key.LeftControl, Key.LeftAlt, Key.L);
+    await keyboard.releaseKey(Key.LeftControl, Key.LeftAlt, Key.L);
+
+    return { success: true, action: 'open_lens', message: 'تم تشغيل عدسة ويندوز المكبرة (Lens Mode)' };
+  } catch (err) {
+    console.error('[nutService] openLens error:', err.message);
+    throw err;
+  }
+}
+
+export async function zoomInLens() {
+  try {
+    await keyboard.pressKey(Key.LeftSuper, Key.Equal);
+    await keyboard.releaseKey(Key.LeftSuper, Key.Equal);
+    return { success: true, action: 'zoom_in_lens', message: 'تكبير العدسة (Win +)' };
+  } catch (err) {
+    console.error('[nutService] zoomInLens error:', err.message);
+    throw err;
+  }
+}
+
+export async function zoomOutLens() {
+  try {
+    await keyboard.pressKey(Key.LeftSuper, Key.Minus);
+    await keyboard.releaseKey(Key.LeftSuper, Key.Minus);
+    return { success: true, action: 'zoom_out_lens', message: 'تصغير العدسة (Win -)' };
+  } catch (err) {
+    console.error('[nutService] zoomOutLens error:', err.message);
+    throw err;
+  }
+}
+
+export async function closeLens() {
+  try {
+    await keyboard.pressKey(Key.LeftSuper, Key.Escape);
+    await keyboard.releaseKey(Key.LeftSuper, Key.Escape);
+    return { success: true, action: 'close_lens', message: 'إغلاق العدسة المكبرة (Win + Esc)' };
+  } catch (err) {
+    console.error('[nutService] closeLens error:', err.message);
+    throw err;
+  }
+}
+
+export async function panLens(dx, dy) {
+  try {
+    return await moveDelta(dx, dy);
+  } catch (err) {
+    console.error('[nutService] panLens error:', err.message);
+    throw err;
+  }
+}
+
+/**
  * Switch Active Window (Alt + Tab)
  */
 export async function switchWindow() {

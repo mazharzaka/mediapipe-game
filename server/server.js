@@ -4,6 +4,7 @@ import path from 'path';
 import { fileURLToPath } from 'url';
 import cors from 'cors';
 import { Server } from 'socket.io';
+import qrcode from 'qrcode-terminal';
 import { env } from './config/env.js';
 import { setupSocketHandler } from './sockets/socketHandler.js';
 import { getSystemStatus } from './services/systemService.js';

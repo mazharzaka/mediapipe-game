@@ -1,6 +1,6 @@
 import * as nutService from "../services/nutService.js";
 import * as systemService from "../services/systemService.js";
-import { streamAiResponse } from "../ai/agent.js";
+import { streamAiResponse, classifyAiError, isDemandOrQuotaError, FALLBACK_MODELS } from "../ai/agent.js";
 import { isAiConfigured, env } from "../config/env.js";
 
 // Keep track of pending confirmation actions per socket
@@ -181,6 +181,37 @@ export function setupSocketHandler(io) {
       }
     });
 
+    // --- Windows Magnifier Lens Mode (0ms latency direct controls) ---
+    socket.on("magnifier_action", async ({ action }) => {
+      try {
+        let result;
+        if (action === "open") {
+          result = await nutService.openLens();
+        } else if (action === "close") {
+          result = await nutService.closeLens();
+        } else if (action === "zoom_in") {
+          result = await nutService.zoomInLens();
+        } else if (action === "zoom_out") {
+          result = await nutService.zoomOutLens();
+        } else {
+          throw new Error(`إجراء عدسة غير معروف: ${action}`);
+        }
+        socket.emit("remote_feedback", { success: true, action, message: result.message });
+      } catch (err) {
+        socket.emit("remote_feedback", { success: false, action, error: err.message });
+      }
+    });
+
+    socket.on("magnifier_pan", async ({ dx, dy }) => {
+      try {
+        if (typeof dx === "number" && typeof dy === "number") {
+          await nutService.panLens(dx, dy);
+        }
+      } catch (err) {
+        console.error("[Socket] magnifier_pan error:", err.message);
+      }
+    });
+
     // --- 4. AI Agent OS Assistant Events ---
     socket.on("ai_command", async (payload) => {
       const prompt =
@@ -221,113 +252,134 @@ export function setupSocketHandler(io) {
       let fullText = "";
       const executedTools = [];
       let pendingAction = null;
-      let streamHasError = false;
 
-      const handleStreamError = (error) => {
-        streamHasError = true;
-        const errMsg = error?.message || String(error);
-        console.error("[AI Stream Runtime Error]:", errMsg);
-        socket.emit("ai_error", {
-          error: errMsg,
-          details: String(error),
-        });
-        socket.emit("ai_stream_chunk", {
-          chunk: `\n[خطأ]: ${errMsg}`,
-          fullText: fullText
-            ? `${fullText}\n[خطأ]: ${errMsg}`
-            : `[خطأ]: ${errMsg}`,
-        });
-      };
+      const primaryModel = env.GEMINI_MODEL || "gemini-3.8-flash";
+      const candidateModels = [
+        primaryModel,
+        ...FALLBACK_MODELS.filter((m) => m !== primaryModel),
+      ];
 
-      try {
-        const result = streamAiResponse({
-          prompt,
-          history,
-          onError: handleStreamError,
-        });
+      let streamSucceeded = false;
+      let lastHandledError = null;
 
-        // Iterate through fullStream to receive text deltas and tool results in real time
-        for await (const part of result.fullStream) {
-          console.log("[AI Stream Part]:", part.type, part);
+      for (let mIdx = 0; mIdx < candidateModels.length; mIdx++) {
+        const currentModel = candidateModels[mIdx];
+        let streamHasError = false;
+        let receivedAnyText = false;
 
-          if (part.type === "text-delta") {
-            const chunk = part.text || part.textDelta || part.delta || "";
-            if (chunk) {
-              fullText += chunk;
-              socket.emit("ai_stream_chunk", { chunk, fullText });
-            }
-          } else if (part.type === "tool-call") {
-            const toolCallInfo = {
-              name: part.toolName,
-              args: part.args || part.input || {},
-            };
-            socket.emit("ai_stream_chunk", {
-              chunk: "",
-              fullText,
-              activeTool: toolCallInfo,
-            });
-          } else if (part.type === "tool-result") {
-            const res = part.result || part.output;
-            const toolResultInfo = {
-              name: part.toolName,
-              args: part.args || part.input || {},
-              result: res,
-            };
-            executedTools.push(toolResultInfo);
+        const handleStreamError = (error) => {
+          if (streamHasError) return;
+          streamHasError = true;
+          lastHandledError = error;
+          const classified = classifyAiError(error);
+          console.error(`[AI Stream Runtime Error] (model: ${currentModel}):`, classified.errMsg);
 
-            // Check if human-in-the-loop power confirmation is requested
-            if (res && res.requiresConfirmation && res.pendingAction) {
-              pendingAction = res.pendingAction;
-              pendingActionsMap.set(res.pendingAction.id, {
-                socketId: socket.id,
-                action: res.pendingAction.action,
-                actionId: res.pendingAction.id,
+          // If no tokens were streamed yet and it's a demand/quota error, try the next model
+          if (!receivedAnyText && isDemandOrQuotaError(error) && mIdx < candidateModels.length - 1) {
+            console.warn(`[AI Stream] Model ${currentModel} returned 503/429 with no output. Trying next model...`);
+            return;
+          }
+
+          socket.emit("ai_error", {
+            error: classified.userMessage,
+            code: classified.code,
+            details: classified.errMsg,
+          });
+          socket.emit("ai_stream_chunk", {
+            chunk: `\n[تنبيه]: ${classified.userMessage}`,
+            fullText: fullText
+              ? `${fullText}\n[تنبيه]: ${classified.userMessage}`
+              : `[تنبيه]: ${classified.userMessage}`,
+          });
+          socket.emit("ai_stream_done", {
+            text: fullText ? `${fullText}\n[تنبيه]: ${classified.userMessage}` : `[تنبيه]: ${classified.userMessage}`,
+            executedTools,
+            error: classified.userMessage,
+          });
+        };
+
+        try {
+          const result = streamAiResponse({
+            prompt,
+            history,
+            onError: handleStreamError,
+            model: currentModel,
+          });
+
+          for await (const part of result.fullStream) {
+            console.log("[AI Stream Part]:", part.type, part);
+
+            if (part.type === "text-delta") {
+              const chunk = part.text || part.textDelta || part.delta || "";
+              if (chunk) {
+                receivedAnyText = true;
+                fullText += chunk;
+                socket.emit("ai_stream_chunk", { chunk, fullText });
+              }
+            } else if (part.type === "tool-call") {
+              const toolCallInfo = {
+                name: part.toolName,
+                args: part.args || part.input || {},
+              };
+              socket.emit("ai_stream_chunk", {
+                chunk: "",
+                fullText,
+                activeTool: toolCallInfo,
               });
-            }
+            } else if (part.type === "tool-result") {
+              const res = part.result || part.output;
+              const toolResultInfo = {
+                name: part.toolName,
+                args: part.args || part.input || {},
+                result: res,
+              };
+              executedTools.push(toolResultInfo);
 
-            socket.emit("ai_stream_chunk", {
-              chunk: "",
-              fullText,
-              toolCompleted: toolResultInfo,
+              if (res && res.requiresConfirmation && res.pendingAction) {
+                pendingAction = res.pendingAction;
+                pendingActionsMap.set(res.pendingAction.id, {
+                  socketId: socket.id,
+                  action: res.pendingAction.action,
+                  actionId: res.pendingAction.id,
+                });
+              }
+
+              socket.emit("ai_stream_chunk", {
+                chunk: "",
+                fullText,
+                toolCompleted: toolResultInfo,
+                pendingAction,
+              });
+            } else if (part.type === "error") {
+              console.error("[AI Stream Part Error]:", part.error);
+              handleStreamError(part.error);
+              break;
+            }
+          }
+
+          if (streamHasError && !receivedAnyText && isDemandOrQuotaError(lastHandledError) && mIdx < candidateModels.length - 1) {
+            console.warn(`[AI Stream] Switching from ${currentModel} to next candidate model...`);
+            continue;
+          }
+
+          if (!streamHasError) {
+            streamSucceeded = true;
+            socket.emit("ai_stream_done", {
+              text: fullText || "",
+              executedTools,
               pendingAction,
             });
-          } else if (part.type === "error") {
-            console.error("[AI Stream Part Error]:", part.error);
-            handleStreamError(part.error);
+            break;
           }
+        } catch (err) {
+          console.error(`[AI Execution Error on ${currentModel}]:`, err.message);
+          if (!receivedAnyText && isDemandOrQuotaError(err) && mIdx < candidateModels.length - 1) {
+            console.warn(`[AI Stream Catch] Model ${currentModel} failed with 503/429. Trying next fallback model...`);
+            continue;
+          }
+          handleStreamError(err);
+          break;
         }
-
-        socket.emit("ai_stream_done", {
-          text:
-            fullText || (streamHasError ? "حدث خطأ أثناء معالجة الطلب." : ""),
-          executedTools,
-          pendingAction,
-        });
-      } catch (err) {
-        console.error("====================================================");
-        console.error("[AI AGENT EXECUTION ERROR DETECTED]:");
-        console.error("Error Message:", err.message);
-        console.error("Stack:", err.stack);
-        console.error("====================================================");
-
-        const errMsg = err.message || "خطأ غير معروف في خادم الذكاء الاصطناعي";
-        socket.emit("ai_error", {
-          error: errMsg,
-          details: String(err),
-        });
-
-        socket.emit("ai_stream_chunk", {
-          chunk: `\n[خطأ]: ${errMsg}`,
-          fullText: fullText
-            ? `${fullText}\n[خطأ]: ${errMsg}`
-            : `[خطأ]: ${errMsg}`,
-        });
-
-        socket.emit("ai_stream_done", {
-          text: fullText ? `${fullText}\n[خطأ]: ${errMsg}` : `[خطأ]: ${errMsg}`,
-          executedTools,
-          error: errMsg,
-        });
       }
     });
 

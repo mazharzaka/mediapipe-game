@@ -2,6 +2,7 @@ import { tool } from 'ai';
 import { z } from 'zod';
 import { openWebsite, openApp, getSystemStatus } from '../services/systemService.js';
 import { mediaControl } from '../services/nutService.js';
+import { playYoutubeVideo, controlMedia, controlMagnifier } from '../tools/relaxTools.js';
 
 /**
  * AI Tool: Open any valid website in default browser
@@ -95,6 +96,9 @@ export const requestPowerActionTool = tool({
 });
 
 export const aiTools = {
+  playYoutubeVideo,
+  controlMedia,
+  controlMagnifier,
   openWebsite: openWebsiteTool,
   mediaControl: mediaControlTool,
   openApp: openAppTool,
