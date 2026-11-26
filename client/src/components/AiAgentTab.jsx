@@ -29,6 +29,7 @@ export default function AiAgentTab() {
   // AI Quota Tracking State
   const [quotaStatus, setQuotaStatus] = useState(null);
   const [quotaAlert, setQuotaAlert] = useState(null);
+  const [currentRouteInfo, setCurrentRouteInfo] = useState(null);
 
   const chatBottomRef = useRef(null);
   const inputRef = useRef(null);
@@ -80,6 +81,7 @@ export default function AiAgentTab() {
             role: "assistant",
             content: finalText,
             tools: finalTools,
+            routeInfo: currentRouteInfo,
           },
         ]);
       }
@@ -91,6 +93,14 @@ export default function AiAgentTab() {
       setCurrentStreamText("");
       setCurrentTools([]);
     };
+
+    const handleRouteInfo = (data) => {
+      if (data) {
+        setCurrentRouteInfo(data);
+      }
+    };
+
+    socket.on("ai_route_info", handleRouteInfo);
 
     const handleAiError = (data) => {
       setIsStreaming(false);
@@ -158,6 +168,7 @@ export default function AiAgentTab() {
     socket.on("ai_error", handleAiError);
     socket.on("ai_action_confirmed", handleActionConfirmed);
     socket.on("ai_action_cancelled", handleActionCancelled);
+    socket.on("ai_route_info", handleRouteInfo);
 
     return () => {
       socket.off("ai_stream_chunk", handleChunk);
@@ -165,6 +176,7 @@ export default function AiAgentTab() {
       socket.off("ai_error", handleAiError);
       socket.off("ai_action_confirmed", handleActionConfirmed);
       socket.off("ai_action_cancelled", handleActionCancelled);
+      socket.off("ai_route_info", handleRouteInfo);
     };
   }, [currentStreamText, currentTools]);
 
@@ -725,13 +737,38 @@ export default function AiAgentTab() {
         {/* SLEEK LOADING & STREAMING INDICATOR BUBBLE */}
         {isStreaming && (
           <div className="self-start max-w-[88%] sm:max-w-[80%] rounded-2xl p-3.5 sm:p-4 border-2 bg-zinc-900 border-teal-500/70 text-zinc-100 flex flex-col gap-2 animate-in fade-in">
-            <div className="flex items-center gap-2 text-teal-300 text-xs font-bold border-b border-zinc-800 pb-1">
-              <span className="relative flex h-2.5 w-2.5">
-                <span className="animate-ping absolute inline-flex h-full w-full rounded-full bg-teal-400 opacity-75"></span>
-                <span className="relative inline-flex rounded-full h-2.5 w-2.5 bg-teal-500"></span>
-              </span>
-              <span>جاري الفرجة والتنفيذ...</span>
+            <div className="flex flex-wrap items-center justify-between gap-2 text-teal-300 text-xs font-bold border-b border-zinc-800 pb-1.5">
+              <div className="flex items-center gap-2">
+                <span className="relative flex h-2.5 w-2.5">
+                  <span className="animate-ping absolute inline-flex h-full w-full rounded-full bg-teal-400 opacity-75"></span>
+                  <span className="relative inline-flex rounded-full h-2.5 w-2.5 bg-teal-500"></span>
+                </span>
+                <span>جاري التنفيذ والرد...</span>
+              </div>
+              {currentRouteInfo && (
+                <div className="flex items-center gap-1.5 text-[11px] font-mono">
+                  <span className="px-1.5 py-0.5 rounded bg-zinc-950 border border-teal-500/50 text-teal-300 font-bold">
+                    🎯 {currentRouteInfo.domain}
+                  </span>
+                  <span className="px-1.5 py-0.5 rounded bg-zinc-950 border border-zinc-700 text-zinc-300">
+                    {currentRouteInfo.targetModel}
+                  </span>
+                  <span className={`px-1.5 py-0.5 rounded border text-[10px] ${
+                    currentRouteInfo.complexity === 'complex'
+                      ? 'bg-amber-950/80 border-amber-500/50 text-amber-300 font-bold'
+                      : 'bg-emerald-950/80 border-emerald-500/50 text-emerald-300 font-bold'
+                  }`}>
+                    {currentRouteInfo.complexity === 'complex' ? 'مركب (5x)' : 'بسيط (1x)'}
+                  </span>
+                </div>
+              )}
             </div>
+
+            {currentRouteInfo?.cleanText && currentRouteInfo.cleanText !== currentRouteInfo.rawText && (
+              <div className="text-xs text-zinc-400 italic bg-zinc-950/70 px-2.5 py-1 rounded border border-zinc-800">
+                🔍 تم توجيه وتصحيح الأمر: "{currentRouteInfo.cleanText}"
+              </div>
+            )}
 
             {currentStreamText ? (
               <p className="text-base sm:text-lg leading-relaxed whitespace-pre-wrap">

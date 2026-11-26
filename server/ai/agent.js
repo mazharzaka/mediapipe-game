@@ -39,6 +39,7 @@ function formatMessages(history, prompt) {
 }
 
 export const FALLBACK_MODELS = [
+  "gemini-3.1-flash-lite",
   "gemini-flash-lite-latest",
   "gemini-3-flash-preview",
   "gemini-3.5-flash-lite",
@@ -160,6 +161,8 @@ export function streamAiResponse({
   history = [],
   onError = null,
   model = null,
+  tools = aiTools,
+  maxSteps = 5,
 }) {
   if (!isAiConfigured()) {
     throw new Error("GOOGLE_GENERATIVE_AI_API_KEY_MISSING");
@@ -169,8 +172,8 @@ export function streamAiResponse({
     apiKey: env.GOOGLE_GENERATIVE_AI_API_KEY,
   });
 
-  const targetModel = model || env.GEMINI_MODEL || "gemini-3.8-flash";
-  console.log(`[AI Agent] Initializing streamText with model: ${targetModel}`);
+  const targetModel = model || env.GEMINI_MODEL || "gemini-3.1-flash-lite";
+  console.log(`[AI Agent] Initializing streamText with model: ${targetModel} (maxSteps: ${maxSteps})`);
 
   const messages = formatMessages(history, prompt);
 
@@ -178,9 +181,9 @@ export function streamAiResponse({
     model: google(targetModel),
     system: SYSTEM_PROMPT,
     messages,
-    tools: aiTools,
-    maxSteps: 5,
-    stopWhen: stepCountIs(5),
+    tools,
+    maxSteps,
+    stopWhen: stepCountIs(maxSteps),
     abortSignal: AbortSignal.timeout(30000),
     onError: ({ error }) => {
       console.error(`[AI onError] (model: ${targetModel}):`, error);

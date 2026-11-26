@@ -3,6 +3,8 @@ import * as systemService from "../services/systemService.js";
 import { streamAiResponse, classifyAiError, isDemandOrQuotaError, FALLBACK_MODELS } from "../ai/agent.js";
 import { isAiConfigured, env } from "../config/env.js";
 import { getQuotaStats } from "../ai/llmClient.js";
+import { routeCommand, filterToolsByDomain } from "../ai/router.js";
+import { aiTools } from "../ai/tools.js";
 
 // Keep track of pending confirmation actions per socket
 const pendingActionsMap = new Map();
@@ -261,10 +263,39 @@ export function setupSocketHandler(io) {
       const executedTools = [];
       let pendingAction = null;
 
-      const primaryModel = env.GEMINI_MODEL || "gemini-3.8-flash";
+      // 1. Semantic Router & Normalizer (Phase 4)
+      let routeInfo = null;
+      try {
+        routeInfo = await routeCommand(prompt);
+      } catch (rErr) {
+        console.error("[Router Error in socketHandler]:", rErr.message);
+      }
+
+      const effectiveText = routeInfo?.cleanText || prompt;
+      const effectiveDomain = routeInfo?.domain || "chat";
+      const effectiveComplexity = routeInfo?.complexity || "simple";
+      const targetModel = routeInfo?.targetModel || "gemini-3.1-flash-lite";
+      const effectiveMaxSteps = routeInfo?.maxSteps || (effectiveComplexity === "complex" ? 5 : 1);
+      const requiresConfirmation = !!routeInfo?.requiresConfirmation;
+      const filteredTools = filterToolsByDomain(aiTools, effectiveDomain, effectiveComplexity);
+
+      console.log(`[Router Output] Domain: ${effectiveDomain} | Complexity: ${effectiveComplexity} | Target: ${targetModel} (${effectiveMaxSteps} steps) | Confirm: ${requiresConfirmation}`);
+
+      // Broadcast route info immediately to client for UI badge display
+      socket.emit("ai_route_info", {
+        rawText: prompt,
+        cleanText: effectiveText,
+        domain: effectiveDomain,
+        complexity: effectiveComplexity,
+        targetModel,
+        maxSteps: effectiveMaxSteps,
+        requiresConfirmation,
+        reasoning: routeInfo?.reasoning || "",
+      });
+
       const candidateModels = [
-        primaryModel,
-        ...FALLBACK_MODELS.filter((m) => m !== primaryModel),
+        targetModel,
+        ...FALLBACK_MODELS.filter((m) => m !== targetModel),
       ];
 
       let streamSucceeded = false;
@@ -308,10 +339,12 @@ export function setupSocketHandler(io) {
 
         try {
           const result = streamAiResponse({
-            prompt,
+            prompt: effectiveText,
             history,
             onError: handleStreamError,
             model: currentModel,
+            tools: filteredTools,
+            maxSteps: effectiveMaxSteps,
           });
 
           for await (const part of result.fullStream) {

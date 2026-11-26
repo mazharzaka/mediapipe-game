@@ -7,7 +7,7 @@
     "test": "node test-keys.js",
     "test:keys": "node test-keys.js",
     "test:fallback": "node test-fallback.js",
-    "test:whisper": "node test-whisper.js",
+    "test:router": "node test-router.js",
     "dev": "node server.js",
     "start:fast": "npm run build --prefix ../client && node server.js"
   },
