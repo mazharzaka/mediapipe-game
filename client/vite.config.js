@@ -12,7 +12,6 @@ export default defineConfig(({ mode }) => {
     server: {
       host: true,
       port: 5173,
-      host: true,
       allowedHosts: true,
       proxy: {
         "/socket.io": {
@@ -23,6 +22,7 @@ export default defineConfig(({ mode }) => {
         "/api": {
           target: backendUrl,
           changeOrigin: true,
+          secure: false,
         },
       },
     },

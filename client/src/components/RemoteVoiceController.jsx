@@ -2,7 +2,7 @@ import { useState, useEffect, useRef } from 'react';
 import { socket } from '../socket';
 
 export default function RemoteVoiceController() {
-  // Voice Recognition State
+  // Voice Recognition State via Google Web Speech API (ar-EG / en-US)
   const [isListening, setIsListening] = useState(false);
   const [voiceLanguage, setVoiceLanguage] = useState('ar-EG');
   const [transcript, setTranscript] = useState('');
@@ -15,6 +15,7 @@ export default function RemoteVoiceController() {
 
   // SpeechRecognition reference
   const recognitionRef = useRef(null);
+  const isListeningRef = useRef(false);
 
   // Trigger temporary feedback badge/banner
   const showFeedback = (message) => {
@@ -37,29 +38,46 @@ export default function RemoteVoiceController() {
     try {
       const recognition = new SpeechRecognition();
       recognition.continuous = false;
-      recognition.interimResults = false;
+      recognition.interimResults = true;
       recognition.lang = voiceLanguage;
 
       recognition.onstart = () => {
         setIsListening(true);
+        isListeningRef.current = true;
         setSpeechError(null);
       };
 
       recognition.onresult = (event) => {
-        const text = event.results?.[0]?.[0]?.transcript || '';
-        if (text) {
-          setTranscript(text);
-          showFeedback(`تم التقاط الصوت: "${text}"`);
+        let interimText = '';
+        let finalText = '';
+
+        for (let i = event.resultIndex; i < event.results.length; i++) {
+          const piece = event.results[i][0].transcript;
+          if (event.results[i].isFinal) {
+            finalText += piece;
+          } else {
+            interimText += piece;
+          }
+        }
+
+        const currentText = (finalText || interimText).trim();
+        if (currentText) {
+          setTranscript(currentText);
+        }
+
+        if (finalText && finalText.trim()) {
+          showFeedback(`تم التقاط الصوت: "${finalText.trim()}"`);
         }
       };
 
       recognition.onerror = (event) => {
-        console.error('Speech recognition error:', event.error);
+        console.error('[RemoteVoice WebSpeech Error]:', event.error);
         setIsListening(false);
+        isListeningRef.current = false;
         if (event.error === 'no-speech') {
-          setSpeechError('لم يتم سماع أي صوت، حاول مجدداً');
+          setSpeechError('لم يتم سماع أي صوت، حاول مجدداً.');
         } else if (event.error === 'not-allowed') {
-          setSpeechError('تم رفض إذن استخدام الميكروفون');
+          setSpeechError('تم رفض إذن استخدام الميكروفون.');
         } else {
           setSpeechError(`خطأ في التعرف على الصوت: ${event.error}`);
         }
@@ -67,6 +85,7 @@ export default function RemoteVoiceController() {
 
       recognition.onend = () => {
         setIsListening(false);
+        isListeningRef.current = false;
       };
 
       recognitionRef.current = recognition;
@@ -79,7 +98,7 @@ export default function RemoteVoiceController() {
       if (recognitionRef.current) {
         try {
           recognitionRef.current.abort();
-        } catch (_) { }
+        } catch (_) {}
       }
       if (feedbackTimeoutRef.current) clearTimeout(feedbackTimeoutRef.current);
     };
@@ -88,11 +107,12 @@ export default function RemoteVoiceController() {
   // Toggle Voice Recognition
   const toggleListening = () => {
     if (!speechSupported) return;
-    if (isListening) {
+    if (isListeningRef.current) {
       try {
         recognitionRef.current?.stop();
-      } catch (_) { }
+      } catch (_) {}
       setIsListening(false);
+      isListeningRef.current = false;
     } else {
       setSpeechError(null);
       try {
@@ -103,17 +123,19 @@ export default function RemoteVoiceController() {
       } catch (err) {
         console.error('Error starting speech recognition:', err);
         setIsListening(false);
+        isListeningRef.current = false;
       }
     }
   };
 
   // Switch recognition language
   const toggleLanguage = () => {
-    if (isListening) {
+    if (isListeningRef.current) {
       try {
         recognitionRef.current?.stop();
-      } catch (_) { }
+      } catch (_) {}
       setIsListening(false);
+      isListeningRef.current = false;
     }
     const nextLang = voiceLanguage === 'ar-EG' ? 'en-US' : 'ar-EG';
     setVoiceLanguage(nextLang);
@@ -212,8 +234,8 @@ export default function RemoteVoiceController() {
             onClick={toggleListening}
             disabled={!speechSupported}
             className={`w-full min-h-24 sm:min-h-28 px-6 py-5 rounded-2xl text-2xl sm:text-3xl font-extrabold flex items-center justify-center gap-4 border-2 transition-colors duration-150 focus-visible:outline-none focus-visible:ring-4 focus-visible:ring-amber-400 focus-visible:ring-offset-4 focus-visible:ring-offset-zinc-950 disabled:opacity-40 disabled:cursor-not-allowed ${isListening
-                ? 'bg-red-600 hover:bg-red-500 text-white border-red-300 shadow-none'
-                : 'bg-teal-600 hover:bg-teal-500 text-white border-teal-300 shadow-none'
+              ? 'bg-red-600 hover:bg-red-500 text-white border-red-300 shadow-none'
+              : 'bg-teal-600 hover:bg-teal-500 text-white border-teal-300 shadow-none'
               }`}
             aria-pressed={isListening}
             aria-label={

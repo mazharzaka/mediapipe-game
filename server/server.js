@@ -8,13 +8,18 @@ import qrcode from 'qrcode-terminal';
 import { env } from './config/env.js';
 import { setupSocketHandler } from './sockets/socketHandler.js';
 import { getSystemStatus } from './services/systemService.js';
+import { registerSocketIo } from './ai/llmClient.js';
 
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
 const clientDist = path.resolve(__dirname, '../client/dist');
 
 const app = express();
-app.use(cors({ origin: env.CORS_ORIGIN }));
+app.use(cors({
+  origin: '*',
+  methods: ['GET', 'POST', 'PUT', 'DELETE', 'OPTIONS'],
+  allowedHeaders: ['Content-Type', 'Authorization', 'X-Requested-With'],
+}));
 app.use(express.json());
 
 // Serve built frontend assets in production mode
@@ -50,6 +55,7 @@ const io = new Server(server, {
 });
 
 // Attach all socket handlers (Touchpad, Remote, Face tracking, AI Agent)
+registerSocketIo(io);
 setupSocketHandler(io);
 
 server.listen(env.PORT, '0.0.0.0', () => {

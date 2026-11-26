@@ -2,6 +2,7 @@ import * as nutService from "../services/nutService.js";
 import * as systemService from "../services/systemService.js";
 import { streamAiResponse, classifyAiError, isDemandOrQuotaError, FALLBACK_MODELS } from "../ai/agent.js";
 import { isAiConfigured, env } from "../config/env.js";
+import { getQuotaStats } from "../ai/llmClient.js";
 
 // Keep track of pending confirmation actions per socket
 const pendingActionsMap = new Map();
@@ -9,6 +10,13 @@ const pendingActionsMap = new Map();
 export function setupSocketHandler(io) {
   io.on("connection", (socket) => {
     console.log(`[Socket] Client connected: ${socket.id}`);
+
+    // Broadcast current AI quota status to newly connected client
+    socket.emit("ai_quota_status", {
+      type: "ai_quota_init",
+      quotaStats: getQuotaStats(),
+      timestamp: Date.now(),
+    });
 
     // --- 1. Face Tracking Events ---
     socket.on("assistiveMove", async ({ x, y }) => {

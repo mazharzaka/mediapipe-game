@@ -4,7 +4,10 @@
   "description": "",
   "main": "index.js",
   "scripts": {
-    "test": "echo \"Error: no test specified\" && exit 1",
+    "test": "node test-keys.js",
+    "test:keys": "node test-keys.js",
+    "test:fallback": "node test-fallback.js",
+    "test:whisper": "node test-whisper.js",
     "dev": "node server.js",
     "start:fast": "npm run build --prefix ../client && node server.js"
   },
@@ -14,11 +17,13 @@
   "type": "module",
   "dependencies": {
     "@ai-sdk/google": "^4.0.124",
+    "@ai-sdk/groq": "^4.0.88",
     "@nut-tree/nut-js": "npm:@nut-tree-fork/nut-js@^4.2.6",
     "ai": "^7.0.179",
     "cors": "^2.8.6",
     "dotenv": "^18.0.10",
     "express": "^5.3.0",
+    "multer": "^2.5.0",
     "qrcode-terminal": "^0.12.0",
     "socket.io": "^4.8.4",
     "yt-search": "^2.13.1",

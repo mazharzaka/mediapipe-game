@@ -15,13 +15,21 @@ export default function AiAgentTab() {
   const [currentStreamText, setCurrentStreamText] = useState("");
   const [currentTools, setCurrentTools] = useState([]);
   const [pendingAction, setPendingAction] = useState(null);
+
+  // Web Speech API Voice Recognition (ar-EG)
   const [isListening, setIsListening] = useState(false);
-  const [speechSupported, setSpeechSupported] = useState(true);
   const [speechError, setSpeechError] = useState("");
+  const [speechSupported, setSpeechSupported] = useState(true);
+  const recognitionRef = useRef(null);
+  const isListeningRef = useRef(false);
+
   const [socketStatus, setSocketStatus] = useState(socket.connected);
   const [showMagnifier, setShowMagnifier] = useState(false);
 
-  const recognitionRef = useRef(null);
+  // AI Quota Tracking State
+  const [quotaStatus, setQuotaStatus] = useState(null);
+  const [quotaAlert, setQuotaAlert] = useState(null);
+
   const chatBottomRef = useRef(null);
   const inputRef = useRef(null);
   const touchStartRef = useRef(null);
@@ -160,7 +168,25 @@ export default function AiAgentTab() {
     };
   }, [currentStreamText, currentTools]);
 
-  // Setup Web Speech API for Arabic (ar-EG)
+  // Listen to live AI quota updates and fallback alerts from server
+  useEffect(() => {
+    const handleQuotaStatus = (data) => {
+      if (data?.quotaStats) {
+        setQuotaStatus(data.quotaStats);
+      }
+      if (data?.type === "ai_fallback_triggered" && data.reason) {
+        setQuotaAlert(`⚠️ تم التحويل إلى ${data.nextModel}: ${data.reason}`);
+        setTimeout(() => setQuotaAlert(null), 7000);
+      }
+    };
+
+    socket.on("ai_quota_status", handleQuotaStatus);
+    return () => {
+      socket.off("ai_quota_status", handleQuotaStatus);
+    };
+  }, []);
+
+  // Web Speech API Voice Recognition (ar-EG)
   useEffect(() => {
     const SpeechRecognition =
       window.SpeechRecognition || window.webkitSpeechRecognition;
@@ -170,102 +196,97 @@ export default function AiAgentTab() {
       return;
     }
 
-    const recognition = new SpeechRecognition();
-    recognition.lang = "ar-EG";
-    recognition.continuous = false;
-    recognition.interimResults = true;
+    try {
+      const recognition = new SpeechRecognition();
+      recognition.continuous = false;
+      recognition.interimResults = true;
+      recognition.lang = "ar-EG";
 
-    recognition.onstart = () => {
-      setIsListening(true);
-      setSpeechError("");
-    };
+      recognition.onstart = () => {
+        setIsListening(true);
+        isListeningRef.current = true;
+        setSpeechError("");
+      };
 
-    recognition.onresult = (event) => {
-      let finalTranscript = "";
-      let interimTranscript = "";
+      recognition.onresult = (event) => {
+        let interimText = "";
+        let finalText = "";
 
-      for (let i = 0; i < event.results.length; i++) {
-        const item = event.results[i];
-        if (item.isFinal) {
-          finalTranscript += item[0].transcript;
-        } else {
-          interimTranscript += item[0].transcript;
+        for (let i = event.resultIndex; i < event.results.length; i++) {
+          const transcriptPiece = event.results[i][0].transcript;
+          if (event.results[i].isFinal) {
+            finalText += transcriptPiece;
+          } else {
+            interimText += transcriptPiece;
+          }
         }
-      }
 
-      const text = finalTranscript || interimTranscript;
-      if (text) {
-        setInputText(text);
-      }
-    };
+        const currentText = (finalText || interimText).trim();
+        if (currentText) {
+          setInputText(currentText);
+        }
 
-    recognition.onerror = (event) => {
-      console.warn("[Web Speech Error]:", event.error);
-      setIsListening(false);
+        // When a final sentence is recognized, send it directly
+        if (finalText && finalText.trim()) {
+          handleSendMessage(finalText.trim());
+        }
+      };
 
-      switch (event.error) {
-        case "not-allowed":
-          setSpeechError(
-            "❌ تم رفض إذن الميكروفون! يرجى السماح بصلاحية المايك من شريط العنوان.",
-          );
-          break;
-        case "service-not-allowed":
-          setSpeechError(
-            "⚠️ خدمة الصوت غير مسموحة على هذا الرابط. تأكد من ضبط Enabled في chrome://flags لرابط السيرفر وإعادة تشغيل كروم.",
-          );
-          break;
-        case "no-speech":
-          setSpeechError("ℹ️ لم يتم التقاط صوت واضح، تحدث بالقرب من المايك.");
-          break;
-        case "audio-capture":
-          setSpeechError("❌ لم يتم العثور على ميكروفون متصل.");
-          break;
-        default:
-          setSpeechError(`خطأ في الميكروفون: ${event.error}`);
-      }
-    };
+      recognition.onerror = (event) => {
+        console.error("[Web Speech API Error]:", event.error);
+        setIsListening(false);
+        isListeningRef.current = false;
+        if (event.error === "no-speech") {
+          setSpeechError("لم يتم سماع أي صوت، اضغط على المايك وتحدث مجدداً.");
+        } else if (event.error === "not-allowed" || event.error === "service-not-allowed") {
+          setSpeechError("❌ تم رفض صلاحية الميكروفون في المتصفح.");
+        } else {
+          setSpeechError(`⚠️ خطأ في التعرف على الصوت: ${event.error}`);
+        }
+      };
 
-    recognition.onend = () => {
-      setIsListening(false);
-    };
+      recognition.onend = () => {
+        setIsListening(false);
+        isListeningRef.current = false;
+      };
 
-    recognitionRef.current = recognition;
+      recognitionRef.current = recognition;
+    } catch (err) {
+      console.error("SpeechRecognition initialization failed:", err);
+      setSpeechSupported(false);
+    }
 
     return () => {
-      try {
-        recognition.abort();
-      } catch {}
+      if (recognitionRef.current) {
+        try {
+          recognitionRef.current.abort();
+        } catch (_) {}
+      }
     };
   }, []);
 
-  const toggleVoiceInput = () => {
-    // Check if the current environment is a secure context (HTTPS, localhost, or flags treated as secure)
-    const isSecure =
-      typeof window !== "undefined" && Boolean(window.isSecureContext);
-
-    if (!isSecure) {
-      setSpeechError(
-        "⚠️ الميكروفون يتطلب بيئة آمنة (Secure Context). على الهاتف عبر الشبكة المحلية (HTTP)، تأكد من تفعيل Enabled لرابط السيرفر من chrome://flags في متصفح Google Chrome واضغط Relaunch.",
-      );
-      return;
-    }
-
+  const toggleListening = () => {
     if (!speechSupported) {
-      setSpeechError("متصفحك لا يدعم التعرف الصوتي (Web Speech API).");
+      setSpeechError("المتصفح لا يدعم Web Speech API. يُرجى استخدام متصفح Google Chrome.");
       return;
     }
 
-    if (isListening) {
+    if (isListeningRef.current) {
       try {
         recognitionRef.current?.stop();
-      } catch {}
+      } catch (_) {}
+      setIsListening(false);
+      isListeningRef.current = false;
     } else {
       setSpeechError("");
       try {
-        recognitionRef.current?.start();
+        if (recognitionRef.current) {
+          recognitionRef.current.start();
+        }
       } catch (err) {
-        console.error("Speech start error:", err);
-        setSpeechError("تعذر بدء تشغيل المايك، يرجى المحاولة ثانية.");
+        console.error("Error starting SpeechRecognition:", err);
+        setIsListening(false);
+        isListeningRef.current = false;
       }
     }
   };
@@ -432,6 +453,33 @@ export default function AiAgentTab() {
           </div>
         </div>
       </header>
+
+      {/* LIVE AI QUOTA STATUS BAR */}
+      <section
+        aria-label="Live AI Quota Status"
+        className="px-3 py-1.5 bg-zinc-950 border-b border-zinc-800 flex flex-wrap items-center justify-between gap-2 text-xs shrink-0 select-none"
+      >
+        <div className="flex flex-wrap items-center gap-3 text-zinc-300">
+          <div className="flex items-center gap-1">
+            <span className="font-semibold text-teal-400">⚡ Gemini 3.1 Flash-Lite:</span>
+            <span className="font-mono bg-zinc-900 px-1.5 py-0.5 rounded border border-zinc-800 text-[11px]">
+              {quotaStatus?.models?.["gemini-3.1-flash-lite"]?.rpm ?? 0}/15 RPM
+            </span>
+          </div>
+          <div className="flex items-center gap-1">
+            <span className="font-semibold text-indigo-400">🛡️ Groq Fallback:</span>
+            <span className="font-mono bg-zinc-900 px-1.5 py-0.5 rounded border border-zinc-800 text-[11px]">
+              {quotaStatus?.models?.["openai/gpt-oss-120b"]?.rpm ?? 0}/30 RPM
+            </span>
+          </div>
+        </div>
+
+        {quotaAlert && (
+          <div className="text-amber-300 bg-amber-950/80 border border-amber-500/50 px-2 py-0.5 rounded text-[11px] animate-in fade-in truncate max-w-full">
+            {quotaAlert}
+          </div>
+        )}
+      </section>
 
       {/* WINDOWS MAGNIFIER LENS CONTROL PANEL (Mobile-First, Ergonomic, High Contrast) */}
       {showMagnifier && (
@@ -720,6 +768,20 @@ export default function AiAgentTab() {
 
       {/* 3. PINNED BOTTOM ACTION BAR (Chips + Input + Voice + Send) */}
       <footer className="shrink-0 p-2.5 sm:p-4 bg-zinc-900 border-t-2 border-zinc-800 flex flex-col gap-2.5">
+        {/* Live Audio Listening Status Banner */}
+        {isListening && (
+          <div
+            className="p-2.5 rounded-xl bg-rose-950/90 border-2 border-rose-500 text-rose-100 text-xs sm:text-sm font-bold flex items-center justify-between gap-2 shadow-lg animate-pulse"
+            role="status"
+          >
+            <div className="flex items-center gap-2">
+              <span className="inline-block w-3 h-3 rounded-full bg-rose-500 animate-ping" />
+              <span>🔴 جاري الاستماع اللحظي (Google Web Speech ar-EG)... تحدث الآن</span>
+            </div>
+            <span className="text-xs text-rose-300 font-normal">يتم الإرسال فور التوقف</span>
+          </div>
+        )}
+
         {/* Error notification banner */}
         {speechError && (
           <div
@@ -763,11 +825,11 @@ export default function AiAgentTab() {
           }}
           className="flex items-center gap-2"
         >
-          {/* Voice Input Button (Web Speech ar-EG) */}
+          {/* Voice Input Button (Google Web Speech API ar-EG) */}
           <button
             type="button"
-            onClick={toggleVoiceInput}
-            disabled={isStreaming}
+            onClick={toggleListening}
+            disabled={isStreaming || !speechSupported}
             className={`min-h-14 w-14 sm:w-16 rounded-xl flex items-center justify-center shrink-0 border-2 transition-colors focus-visible:outline-none focus-visible:ring-4 focus-visible:ring-amber-400 disabled:opacity-40 ${
               isListening
                 ? "bg-rose-600 hover:bg-rose-500 text-white border-rose-300 animate-pulse"
@@ -775,9 +837,15 @@ export default function AiAgentTab() {
             }`}
             aria-pressed={isListening}
             aria-label={
-              isListening ? "إيقاف التسجيل الصوتي" : "تحدث بالمايك (ar-EG)"
+              isListening
+                ? "إيقاف الاستماع الصوتي"
+                : "تحدث بالمايك (Google Web Speech ar-EG)"
             }
-            title={isListening ? "إيقاف التسجيل" : "تحدث بالصوت"}
+            title={
+              isListening
+                ? "إيقاف الاستماع"
+                : "تحدث بالصوت فورياً (Google Web Speech)"
+            }
           >
             <span className="text-2xl" aria-hidden="true">
               {isListening ? "⏹" : "🎙️"}
