@@ -22,8 +22,8 @@ app.use(cors({
 }));
 app.use(express.json());
 
-// Serve built frontend assets in production mode
-app.use(express.static(clientDist));
+// Serve built frontend assets in production mode (redirect: false so /loly SPA route isn't redirected to /loly/ folder)
+app.use(express.static(clientDist, { redirect: false }));
 
 // API route to provide local network IP address for QR code mobile pairing
 app.get('/api/network-info', (req, res) => {

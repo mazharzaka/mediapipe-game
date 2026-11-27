@@ -303,7 +303,7 @@ export default function HomeSelector() {
           </h2>
 
           <nav
-            className="grid grid-cols-1 sm:grid-cols-2 gap-6"
+            className="grid grid-cols-1 sm:grid-cols-3 gap-6"
             aria-label="Application choices"
           >
             {/* Assistive Tool & AI Agent Button (Large Primary Action) */}
@@ -316,10 +316,35 @@ export default function HomeSelector() {
                 🤖
               </span>
               <span className="text-xl sm:text-2xl font-bold">
-                المساعد الذكي وأدوات التحكم (Assistive & AI Suite)
+                المساعد الذكي (زاقا)
               </span>
-              <span className="text-base text-teal-100 font-medium">
-                المساعد الذكي (AI Agent)، تتبع الوجه، التاتش باد، والريموت
+              <span className="text-sm sm:text-base text-teal-100 font-medium">
+                المساعد الصوتي، تتبع الوجه، التاتش باد، والريموت
+              </span>
+            </Link>
+
+            {/* Loly Interactive Cartoon World Button */}
+            <Link
+              to="/loly"
+              className="min-h-20 sm:min-h-24 p-6 rounded-xl bg-amber-500 hover:bg-amber-400 text-zinc-950 border-2 border-yellow-200 flex flex-col items-center justify-center gap-2.5 text-center focus-visible:outline-none focus-visible:ring-4 focus-visible:ring-amber-300 focus-visible:ring-offset-4 focus-visible:ring-offset-zinc-950 transition-colors duration-150"
+              style={{ boxShadow: "0 0 22px rgba(250, 204, 21, 0.4)" }}
+              aria-label="عالم لولي الكرتوني التفاعلي"
+            >
+              <span
+                className="w-16 h-16 rounded-full overflow-hidden bg-amber-50 border-4 border-yellow-100 ring-2 ring-amber-700 flex items-center justify-center"
+                style={{ boxShadow: "0 0 14px rgba(253, 224, 71, 0.95)" }}
+              >
+                <img
+                  src="/loly/characters/loly.png"
+                  alt="لولي"
+                  className="w-full h-full object-cover"
+                />
+              </span>
+              <span className="text-xl sm:text-2xl font-extrabold">
+                لولي 👑
+              </span>
+              <span className="text-sm sm:text-base text-zinc-900 font-bold">
+                عالم لولاتي الكرتوني التفاعلي الساحر
               </span>
             </Link>
 
@@ -335,7 +360,7 @@ export default function HomeSelector() {
               <span className="text-xl sm:text-2xl font-bold">
                 Play Boxing Game
               </span>
-              <span className="text-base text-zinc-300 font-medium">
+              <span className="text-sm sm:text-base text-zinc-300 font-medium">
                 ساحة لعبة الملاكمة بالإيماءات
               </span>
             </Link>

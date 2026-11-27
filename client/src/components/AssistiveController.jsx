@@ -419,10 +419,10 @@ export default function AssistiveController() {
 
   return (
     <main
-      className={`bg-zinc-950 text-zinc-50 flex flex-col max-w-5xl mx-auto ${
+      className={`bg-zinc-950 text-zinc-50 flex flex-col max-w-5xl mx-auto w-full ${
         isAiTab
-          ? 'h-[100dvh] max-h-[100dvh] overflow-hidden p-0 gap-0 sm:min-h-screen sm:h-auto sm:max-h-none sm:overflow-visible sm:p-6 lg:p-8 sm:gap-4'
-          : 'min-h-screen p-4 sm:p-6 lg:p-8 gap-6'
+          ? 'flex-1 min-h-0 h-full max-h-full overflow-hidden p-0 gap-0 sm:min-h-screen sm:h-auto sm:max-h-none sm:overflow-visible sm:p-6 lg:p-8 sm:gap-4'
+          : 'flex-1 overflow-y-auto p-4 sm:p-6 lg:p-8 gap-6'
       }`}
       aria-label="Assistive Technology & AI Agent Control Suite"
     >

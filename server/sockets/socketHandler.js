@@ -717,6 +717,68 @@ export function setupSocketHandler(io) {
       }
     });
 
+    // --- Isolated Loly Baby World Sync (Strictly separated under loly:* & 'loly-room') ---
+    const emitLolyPhoneStatus = () => {
+      const room = io.sockets.adapter.rooms.get("loly-room");
+      let phoneConnected = false;
+      const roomSize = room ? room.size : 0;
+      if (room) {
+        for (const sid of room) {
+          const clientSock = io.sockets.sockets.get(sid);
+          if (clientSock?.data?.lolyRole === "mobile") {
+            phoneConnected = true;
+            break;
+          }
+        }
+      }
+      io.to("loly-room").emit("loly:phone_status", {
+        phoneConnected,
+        roomSize,
+        ts: Date.now(),
+      });
+    };
+
+    socket.on("loly:join", (payload = {}) => {
+      socket.join("loly-room");
+      if (payload?.role) {
+        socket.data.lolyRole = payload.role;
+      }
+      emitLolyPhoneStatus();
+    });
+
+    socket.on("loly:motion", (data) => {
+      if (!socket.rooms.has("loly-room")) {
+        socket.join("loly-room");
+        socket.data.lolyRole = "mobile";
+        emitLolyPhoneStatus();
+      }
+      socket.to("loly-room").emit("loly:motion", data);
+    });
+
+    socket.on("loly:phone_status", (data = {}) => {
+      if (!socket.rooms.has("loly-room")) {
+        socket.join("loly-room");
+      }
+      if (data?.role) {
+        socket.data.lolyRole = data.role;
+      }
+      socket.to("loly-room").emit("loly:phone_status", {
+        ...data,
+        ts: Date.now(),
+      });
+    });
+
+    socket.on("loly:control", (data) => {
+      socket.to("loly-room").emit("loly:control", data);
+    });
+
+    socket.on("disconnecting", () => {
+      if (socket.rooms.has("loly-room")) {
+        socket.data.lolyRole = null;
+        setTimeout(emitLolyPhoneStatus, 50);
+      }
+    });
+
     socket.on("disconnect", () => {
       console.log(`[Socket] Client disconnected: ${socket.id}`);
       for (const [id, data] of pendingActionsMap.entries()) {
