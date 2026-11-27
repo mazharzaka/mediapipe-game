@@ -18,7 +18,7 @@ export const env = {
     process.env.GEMINI_API_KEY ||
     ""
   ).trim(),
-  GEMINI_MODEL: (process.env.GEMINI_MODEL || "gemini-3.8-flash").trim(),
+  GEMINI_MODEL: (process.env.GEMINI_MODEL || "gemini-3.1-flash-lite").trim(),
 };
 
 // Alias for convenience

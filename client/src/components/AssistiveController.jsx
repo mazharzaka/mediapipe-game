@@ -409,19 +409,29 @@ export default function AssistiveController() {
   };
 
   const tabsList = [
-    { id: 'ai', label: '🤖 المساعد الذكي (AI Agent)' },
-    { id: 'touchpad', label: '🖱️ التاتش باد (Touchpad)' },
-    { id: 'remote', label: '📱 الريموت (Remote)' },
-    { id: 'face', label: '👤 تتبع الوجه (Face)' },
+    { id: 'ai', label: '🤖 المساعد الذكي (AI Agent)', shortLabel: '🤖 زاقا' },
+    { id: 'touchpad', label: '🖱️ التاتش باد (Touchpad)', shortLabel: '🖱️ ماوس' },
+    { id: 'remote', label: '📱 الريموت (Remote)', shortLabel: '📱 ريموت' },
+    { id: 'face', label: '👤 تتبع الوجه (Face)', shortLabel: '👤 وجه' },
   ];
+
+  const isAiTab = activeTab === 'ai';
 
   return (
     <main
-      className="min-h-screen bg-zinc-950 text-zinc-50 p-4 sm:p-6 lg:p-8 flex flex-col gap-6 max-w-5xl mx-auto"
+      className={`bg-zinc-950 text-zinc-50 flex flex-col max-w-5xl mx-auto ${
+        isAiTab
+          ? 'h-[100dvh] max-h-[100dvh] overflow-hidden p-0 gap-0 sm:min-h-screen sm:h-auto sm:max-h-none sm:overflow-visible sm:p-6 lg:p-8 sm:gap-4'
+          : 'min-h-screen p-4 sm:p-6 lg:p-8 gap-6'
+      }`}
       aria-label="Assistive Technology & AI Agent Control Suite"
     >
-      {/* Top Header & Connection Status */}
-      <header className="flex flex-col sm:flex-row items-start sm:items-center justify-between gap-4 pb-4 border-b border-zinc-700">
+      {/* Top Header & Connection Status (Hidden on mobile when inside full-viewport AI Chat tab to prevent double scroll) */}
+      <header
+        className={`${
+          isAiTab ? 'hidden sm:flex' : 'flex'
+        } flex-col sm:flex-row items-start sm:items-center justify-between gap-4 pb-4 border-b border-zinc-700`}
+      >
         <div className="space-y-1">
           <div className="flex items-center gap-3">
             <Link
@@ -460,10 +470,14 @@ export default function AssistiveController() {
         </div>
       </header>
 
-      {/* TOP NAVIGATION TABS (Clinical-Grade, WCAG AAA Large Targets >= 56px) */}
+      {/* TOP NAVIGATION TABS (Compact single-row on mobile AI mode to eliminate double scroll) */}
       <nav
         aria-label="Application Control Modes"
-        className="grid grid-cols-2 sm:grid-cols-4 gap-3 bg-zinc-900 p-2 rounded-2xl border-2 border-zinc-700"
+        className={`bg-zinc-900 border-zinc-700 shrink-0 ${
+          isAiTab
+            ? 'grid grid-cols-4 gap-1 p-1 border-b sm:gap-3 sm:p-2 sm:rounded-2xl sm:border-2'
+            : 'grid grid-cols-2 sm:grid-cols-4 gap-3 p-2 rounded-2xl border-2'
+        }`}
       >
         {tabsList.map((tab) => {
           const isActive = activeTab === tab.id;
@@ -472,14 +486,19 @@ export default function AssistiveController() {
               key={tab.id}
               type="button"
               onClick={() => switchTab(tab.id)}
-              className={`min-h-16 px-4 py-3 rounded-xl font-bold text-lg sm:text-xl flex items-center justify-center text-center transition-colors duration-150 border-2 focus-visible:outline-none focus-visible:ring-4 focus-visible:ring-amber-400 focus-visible:ring-offset-2 focus-visible:ring-offset-zinc-950 ${
+              className={`rounded-xl font-bold flex items-center justify-center text-center transition-colors duration-150 border-2 focus-visible:outline-none focus-visible:ring-4 focus-visible:ring-amber-400 focus-visible:ring-offset-2 focus-visible:ring-offset-zinc-950 ${
+                isAiTab
+                  ? 'min-h-11 px-1.5 py-1.5 text-xs sm:min-h-14 sm:px-4 sm:py-2.5 sm:text-lg'
+                  : 'min-h-16 px-4 py-3 text-lg sm:text-xl'
+              } ${
                 isActive
                   ? 'bg-teal-600 text-white border-teal-300 shadow-none'
                   : 'bg-zinc-950 text-zinc-300 hover:text-white hover:bg-zinc-800 border-zinc-800'
               }`}
               aria-current={isActive ? 'page' : undefined}
             >
-              {tab.label}
+              <span className={isAiTab ? 'sm:hidden truncate' : 'hidden'}>{tab.shortLabel}</span>
+              <span className={isAiTab ? 'hidden sm:inline' : 'inline'}>{tab.label}</span>
             </button>
           );
         })}

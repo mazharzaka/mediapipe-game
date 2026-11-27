@@ -1,13 +1,123 @@
 import * as nutService from "../services/nutService.js";
 import * as systemService from "../services/systemService.js";
-import { streamAiResponse, classifyAiError, isDemandOrQuotaError, FALLBACK_MODELS } from "../ai/agent.js";
+import {
+  streamAiResponse,
+  classifyAiError,
+  isDemandOrQuotaError,
+  FALLBACK_MODELS,
+  recoverLeakedJsonTools,
+} from "../ai/agent.js";
 import { isAiConfigured, env } from "../config/env.js";
 import { getQuotaStats } from "../ai/llmClient.js";
 import { routeCommand, filterToolsByDomain } from "../ai/router.js";
 import { aiTools } from "../ai/tools.js";
+import { controlMediaPlayback } from "../ai/tools/youtubeTools.js";
 
 // Keep track of pending confirmation actions per socket
 const pendingActionsMap = new Map();
+
+/**
+ * Zero-Token Local Fast Path Matcher:
+ * Matches direct single-intent media & volume commands in Egyptian Arabic / English
+ * without consuming any Gemini or Groq API quota.
+ */
+export function matchZeroTokenFastPath(rawPrompt) {
+  if (!rawPrompt || typeof rawPrompt !== "string") return null;
+
+  // Normalize diacritics, alef forms, punctuation, and strip optional ZAKA wake-word prefix or polite fillers
+  let cleaned = rawPrompt
+    .trim()
+    .replace(/[\u064B-\u065F\u0640]/g, "")
+    .replace(/[أإآ]/g, "ا")
+    .replace(/[ة]/g, "ه")
+    .replace(/[؟?!.,،]+/g, " ")
+    .replace(/^(?:يا\s*)?(?:زاقا|زاكا|زكا|زقه|ذكا|زكاء|ذاكره|ذاكرة|zaka|zaqa)\s*/i, "")
+    .replace(/\b(?:لو\s*سمحت|بعد\s*اذنك|من\s*فضلك|يا\s*باشا|دلوقتي|حالا)\b/gi, "")
+    .replace(/\s+/g, " ")
+    .trim();
+
+  if (!cleaned) return null;
+
+  // Do NOT hijack compound multi-step commands (e.g. "شغل ملخص ماتش وعلي الصوت")
+  if (/\s+و(?:شغل|افتح|اقفل|اعمل|جيب|هات|بص)\b/i.test(cleaned)) {
+    return null;
+  }
+
+  // 1. Volume Up: علي الصوت / زود الصوت / ارفع الصوت (7 consecutive pulses = ~14%)
+  if (/^(?:علي|زود|ارفع)\s+الصوت(?:\s+(?:شويه|كمان|اكتر|سنه|قوي))?$/i.test(cleaned)) {
+    const isStrong = /كمان|اكتر|قوي/.test(cleaned);
+    return {
+      action: "volume_up",
+      repeat: isStrong ? 10 : 7,
+      reply: "🔊 علّيت الصوت فوراً (+14% مسار محلي مجاني).",
+    };
+  }
+
+  // 2. Volume Down: وطي الصوت / قلل الصوت / نزل الصوت / اخفض الصوت (7 consecutive pulses = ~14%)
+  if (/^(?:وطي|قلل|نزل|اخفض|هدي)\s+الصوت(?:\s+(?:شويه|كمان|سنه|خالص))?$/i.test(cleaned)) {
+    const isStrong = /كمان|خالص/.test(cleaned);
+    return {
+      action: "volume_down",
+      repeat: isStrong ? 10 : 7,
+      reply: "🔉 وطّيت الصوت فوراً (-14% مسار محلي مجاني).",
+    };
+  }
+
+  // 3. Mute / Unmute: اعمل ميوت / اكتم الصوت / ميوت
+  if (/^(?:(?:اعمل\s+)?ميوت|اكتم(?:\s+الصوت)?|كتم\s+الصوت|mute)$/i.test(cleaned)) {
+    return {
+      action: "mute",
+      repeat: 1,
+      reply: "🔇 تم كتم/إلغاء كتم الصوت فوراً (مسار محلي مجاني).",
+    };
+  }
+
+  // 4. Play / Pause: وقف الفيديو / شغل الفيديو / بوز / كمل الفيديو
+  if (
+    /^(?:وقف(?:\s+(?:الفيديو|الميديا|التشغيل|الصوت))?|شغل\s+الفيديو|كمل(?:\s+(?:الفيديو|التشغيل))?|استمر|بوز|ستوب|pause|resume)$/i.test(
+      cleaned,
+    )
+  ) {
+    return {
+      type: "media",
+      action: "play_pause",
+      repeat: 1,
+      reply: "⏯️ تم إيقاف/تشغيل الفيديو فوراً (مسار محلي مجاني).",
+    };
+  }
+
+  // 5. Scroll Down: انزل تحت / انزل تحت شوية / سكرول لتحت / نزل الصفحة / scroll down
+  if (
+    /^(?:انزل(?:\s+(?:تحت|لتحت))?|سكرول\s+(?:تحت|لتحت)|نزل\s+الصفحه|scroll\s+down)(?:\s+(?:شويه|كمان|اكتر|سنه))*$/i.test(
+      cleaned,
+    )
+  ) {
+    return {
+      type: "scroll",
+      action: "scroll_down",
+      direction: "down",
+      amount: 5,
+      reply: "⬇️ تم التمرير لأسفل فوراً (مسار محلي مجاني).",
+    };
+  }
+
+  // 6. Scroll Up: اطلع فوق / اطلع فوق شوية / سكرول لفوق / طلع الصفحة / scroll up
+  if (
+    /^(?:اطلع(?:\s+(?:فوق|لفوق))?|سكرول\s+(?:فوق|لفوق)|طلع\s+الصفحه|scroll\s+up)(?:\s+(?:شويه|كمان|اكتر|سنه))*$/i.test(
+      cleaned,
+    )
+  ) {
+    return {
+      type: "scroll",
+      action: "scroll_up",
+      direction: "up",
+      amount: 5,
+      reply: "⬆️ تم التمرير لأعلى فوراً (مسار محلي مجاني).",
+    };
+  }
+
+  return null;
+}
 
 export function setupSocketHandler(io) {
   io.on("connection", (socket) => {
@@ -240,6 +350,71 @@ export function setupSocketHandler(io) {
         return;
       }
 
+      // 0. Zero-Token Fast Path for instant media/volume/scroll commands (0 API quota consumed)
+      const fastPathMatch = matchZeroTokenFastPath(prompt);
+      if (fastPathMatch) {
+        console.log(
+          `[Zero-Token Fast Path] Matched "${prompt}" -> ${fastPathMatch.action}`,
+        );
+
+        socket.emit("ai_route_info", {
+          rawText: prompt,
+          cleanText: prompt.trim(),
+          domain: fastPathMatch.type === "scroll" ? "browser" : "youtube",
+          complexity: "simple",
+          targetModel: "local-fast-path",
+          model: "local-fast-path",
+          maxSteps: 0,
+          requiresConfirmation: false,
+          reasoning: "مسار سريع محلي بدون استهلاك كوتة الذكاء الاصطناعي",
+        });
+
+        let execResult;
+        let toolNameUsed;
+        let toolArgsUsed;
+
+        if (fastPathMatch.type === "scroll") {
+          await nutService.scroll(fastPathMatch.direction, fastPathMatch.amount || 5);
+          execResult = {
+            success: true,
+            direction: fastPathMatch.direction,
+            amount: fastPathMatch.amount || 5,
+          };
+          toolNameUsed = "localScroll";
+          toolArgsUsed = { direction: fastPathMatch.direction, amount: fastPathMatch.amount || 5 };
+        } else {
+          execResult = await controlMediaPlayback.execute({
+            action: fastPathMatch.action,
+            repeat: fastPathMatch.repeat,
+          });
+          toolNameUsed = "controlMediaPlayback";
+          toolArgsUsed = { action: fastPathMatch.action, repeat: fastPathMatch.repeat };
+        }
+
+        const executedToolEntry = {
+          name: toolNameUsed,
+          args: toolArgsUsed,
+          result: execResult,
+        };
+
+        const replyText = execResult?.success
+          ? fastPathMatch.reply
+          : `⚠️ تعذر تنفيذ الأمر محلياً: ${execResult?.error || "خطأ غير معروف"}`;
+
+        socket.emit("ai_stream_chunk", {
+          chunk: replyText,
+          fullText: replyText,
+          toolCompleted: executedToolEntry,
+        });
+
+        socket.emit("ai_stream_done", {
+          text: replyText,
+          model: "local-fast-path",
+          executedTools: [executedToolEntry],
+        });
+        return;
+      }
+
       if (!isAiConfigured()) {
         const warning =
           "⚠️ تنبيه: مفتاح Google Generative AI (GOOGLE_GENERATIVE_AI_API_KEY) غير مسجل في ملف .env بالسيرفر.\nيرجى إضافة المفتاح في server/.env لتفعيل المساعد الذكي، مع العلم أن باقي وظائف التتبع والريموت والتاتش باد تعمل بشكل طبيعي.";
@@ -293,6 +468,51 @@ export function setupSocketHandler(io) {
         reasoning: routeInfo?.reasoning || "",
       });
 
+      // Human-in-the-Loop Guard: If router determined this is a critical action (e.g. Shutdown, Restart)
+      // halt immediate execution and prompt user for explicit confirmation
+      if (requiresConfirmation && !payload?.confirmed) {
+        const actionId = `req_confirm_${Date.now()}_${Math.random().toString(36).slice(2, 7)}`;
+        pendingActionsMap.set(actionId, {
+          socketId: socket.id,
+          isRouterConfirmation: true,
+          actionId,
+          action: effectiveDomain === 'power' ? 'shutdown' : 'sensitive_action',
+          prompt: effectiveText,
+          history,
+          routeInfo,
+          domain: effectiveDomain,
+          complexity: effectiveComplexity,
+          targetModel,
+          maxSteps: effectiveMaxSteps,
+          filteredTools,
+        });
+
+        console.log(`[Router Guard] Halted command awaiting confirmation: "${effectiveText}" (Action ID: ${actionId})`);
+
+        socket.emit("ai_confirmation_required", {
+          id: actionId,
+          actionId,
+          action: effectiveDomain === 'power' ? 'shutdown' : 'sensitive_action',
+          title: `تأكيد أمر حساس: ${effectiveText}`,
+          cleanText: effectiveText,
+          domain: effectiveDomain,
+          reasoning: routeInfo?.reasoning || "أمر حساس يتطلب موافقة صريحة قبل التنفيذ",
+        });
+
+        socket.emit("ai_stream_done", {
+          text: `⚠️ الأمر المطلوب ("${effectiveText}") حساس وقد يؤثر على تشغيل النظام. يرجى الضغط على زر التأكيد أدناه للمتابعة.`,
+          executedTools: [],
+          requiresConfirmation: true,
+          pendingAction: {
+            id: actionId,
+            action: effectiveDomain === 'power' ? 'shutdown' : 'sensitive_action',
+            title: `تأكيد أمر حساس: ${effectiveText}`,
+            reason: routeInfo?.reasoning || "أمر حساس يتطلب موافقة صريحة قبل التنفيذ",
+          },
+        });
+        return;
+      }
+
       const candidateModels = [
         targetModel,
         ...FALLBACK_MODELS.filter((m) => m !== targetModel),
@@ -345,6 +565,7 @@ export function setupSocketHandler(io) {
             model: currentModel,
             tools: filteredTools,
             maxSteps: effectiveMaxSteps,
+            domain: effectiveDomain,
           });
 
           for await (const part of result.fullStream) {
@@ -404,6 +625,33 @@ export function setupSocketHandler(io) {
           }
 
           if (!streamHasError) {
+            // Safety Net: If model printed raw JSON tool call without invoking native tool calling, execute & strip JSON!
+            if (executedTools.length === 0 && effectiveDomain !== "chat" && fullText) {
+              const recovery = await recoverLeakedJsonTools(fullText, filteredTools);
+              if (recovery.wasRecovered) {
+                fullText = recovery.cleanedText;
+                for (let idx = 0; idx < recovery.recoveredResults.length; idx++) {
+                  const rec = recovery.recoveredResults[idx];
+                  const resObj = rec.result;
+                  const tInfo = {
+                    name: rec.toolName,
+                    args: rec.args,
+                    result: resObj,
+                  };
+                  executedTools.push(tInfo);
+                  if (resObj && resObj.requiresConfirmation && resObj.pendingAction) {
+                    pendingAction = resObj.pendingAction;
+                    pendingActionsMap.set(resObj.pendingAction.id, {
+                      socketId: socket.id,
+                      action: resObj.pendingAction.action,
+                      actionId: resObj.pendingAction.id,
+                    });
+                  }
+                }
+                socket.emit("ai_stream_chunk", { chunk: "", fullText, pendingAction });
+              }
+            }
+
             streamSucceeded = true;
             socket.emit("ai_stream_done", {
               text: fullText || "",
@@ -453,6 +701,10 @@ export function setupSocketHandler(io) {
           action,
           success: true,
           message: execResult.message,
+        });
+        socket.emit("ai_stream_done", {
+          text: `تم التأكيد وتنفيذ أمر الطاقة (${action}) بنجاح: ${execResult.message}`,
+          executedTools: [{ name: "controlPower", args: { action, confirmed: true }, result: execResult }],
         });
       } catch (err) {
         console.error("[AI HITL Execution Error]:", err);

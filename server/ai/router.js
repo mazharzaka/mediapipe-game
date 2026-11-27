@@ -79,32 +79,32 @@ const ROUTER_SYSTEM_PROMPT = `أنت "المصفّي والموجّه الدلا
      * "بوك 1" / "بوك وان" ◄ "Book1.xlsx" (خاصة إذا كان متعلقاً بالإكسيل أو موجوداً على الديسكتوب)
      * "اي 1" / "خلية اي 1" ◄ "A1"
      * تحويل الأرقام المنطوقة لأرقام مجردة: "خمسمية" ◄ "500"، "مية" ◄ "100"، "ألفين ونص" ◄ "2500"
-   - الاستعانة بقائمة ملفات الديسكتوب الممررة لمطابقة اسم الملف المذكور بأقرب ملف حقيقي موجود.
+   - الاستعانة بقائمة ملفات الديسكتوب لمطابقة الأسماء المنطوقة بالعربية فقط (مثل "بوك 1")، أما إذا ذكر المستخدم اسم ملف صريح بامتداد (.xlsx, .txt) مثل _test_stage6.xlsx فاحتفظ بالاسم كما هو بالضبط ولا تستبدله أبداً بأي ملف آخر.
 
 3. تصنيف المجال (domain) بدقة إلى واحد من المجالات السبعة:
    - "youtube": تشغيل وبحث الفيديوهات والأغاني والماتشات، والتحكم في الصوت/الملء أثناء المشاهدة.
    - "system_cli": أوامر التيرمنال، تشغيل السيرفرات والأكواد، برامج المطورين، فحص أخطاء logs/terminal.
    - "browser": فتح المواقع والروابط، التصفح، إغلاق وفتح التابات، المتصفح الخفي Incognito.
-   - "file_office": التعامل مع ملفات الإكسيل والأوفيس، تعديل الخلايا، قراءة وكتابة الجداول والمستندات.
+   - "file_office": التعامل مع ملفات الإكسيل والأوفيس، تعديل الخلايا، وعرض أو فتح أو إنشاء أو حذف الملفات والمجلدات على سطح المكتب (Desktop).
    - "power": أوامر الطاقة (Lock, Sleep, Restart, Shutdown).
    - "vision": عدسة ويندوز المكبرة (Windows Magnifier)، تكبير وتصغير الشاشة، قراءة وفحص محتوى الشاشة بصرياً.
    - "chat": استفسارات عامة، دردشة، تحية، أسئلة لا تتطلب تنفيذ أوامر على الجهاز.
 
 4. تحديد مستوى الصعوبة (complexity):
-   - "simple": أمر مباشر من خطوة واحدة واضحة (مثل تشغيل فيديو، رفع/خفض الصوت، فتح برنامج، إغلاق تاب، عمل Lock، إيقاف التشغيل).
-   - "complex": أمر مركب من خطوتين أو أكثر (مثل فتح موقع ثم قفل تاب ثم ملء الشاشة)، أو يتطلب تعديل بيانات داخل ملف (تعديل خلية في إكسيل)، أو قراءة مخرجات تيرمنال/شاشة واتخاذ قرار بناءً عليها.
+   - "simple": أي أمر أحادي التنفيذ في مجالات youtube, browser, power, file_office (حتى لو كانت الجملة العربية طويلة جداً، أو تتضمن فتح ملف إكسيل وتعديل خلية واحدة لأن الأداة تنفذها في خطوة واحدة).
+   - "complex": فقط للأوامر التي تجمع فعلين مستقلين تماماً في جملة واحدة (مثل فتح موقع ثم قفل تاب آخر ثم ملء الشاشة)، أو قراءة مخرجات تيرمنال وفحص الأخطاء لاتخاذ قرار.
 
 5. شرط التأكيد (requiresConfirmation):
-   - يكون true فقط للأوامر الخطيرة غير القابلة للتراجع: إيقاف التشغيل الكامل (Shutdown)، إعادة التشغيل (Restart)، حذف ملفات، أو إرسال إيميل.
+   - يكون true فقط للأوامر الخطيرة غير القابلة للتراجع: إيقاف التشغيل الكامل (Shutdown)، إعادة التشغيل (Restart)، حذف ملفات، أو قتل العمليات (kill process).
    - يكون false لأي أمر آخر (بما فيها Lock و Sleep وفتح/إغلاق البرامج والتابات).
 
 أمثلة مرجعية (Few-Shot Examples):
 - الإدخال: "افتح شيت الاكسيل اللي اسمه بوك 1 وخلي خلية اي 1 خمسمية"
-  cleanText: "افتح شيت الإكسيل Book1.xlsx وعدل خلية A1 إلى 500"
+  cleanText: "عدل خلية A1 إلى 500 في شيت الإكسيل Book1.xlsx"
   domain: "file_office"
-  complexity: "complex"
+  complexity: "simple"
   requiresConfirmation: false
-  reasoning: "تعديل خلية بملف إكسيل مركب من خطوتين"
+  reasoning: "تعديل خلية إكسيل بأداة واحدة مباشرة"
 
 - الإدخال: "بقول لك افتح أنتجافتي وشغل ام بي ام ران ديف من التيرميل"
   cleanText: "افتح Antigravity وشغل npm run dev في Terminal"
@@ -134,12 +134,54 @@ const ROUTER_SYSTEM_PROMPT = `أنت "المصفّي والموجّه الدلا
   requiresConfirmation: true
   reasoning: "إيقاف تشغيل حاسوب أمر طاقة حساس"
 
+- الإدخال: "طفي الكمبيوتر دلوقتي"
+  cleanText: "إيقاف تشغيل الكمبيوتر (Shutdown)"
+  domain: "power"
+  complexity: "simple"
+  requiresConfirmation: true
+  reasoning: "إطفاء الكمبيوتر أمر طاقة حساس يتطلب تأكيد"
+
+- الإدخال: "اعمل ريستارت للويندوز"
+  cleanText: "إعادة تشغيل الكمبيوتر (Restart)"
+  domain: "power"
+  complexity: "simple"
+  requiresConfirmation: true
+  reasoning: "إعادة تشغيل الويندوز أمر طاقة حساس يتطلب تأكيد"
+
+- الإدخال: "شوف بورت 3000 شغال عليه ايه"
+  cleanText: "فحص العمليات التي تستمع على Port 3000"
+  domain: "system_cli"
+  complexity: "simple"
+  requiresConfirmation: false
+  reasoning: "فحص العمليات على بورت محدد خطوة واحدة"
+
 - الإدخال: "لو السيرفر مطلع إيرور في التيرمنال اقرأه وقولي السبب"
   cleanText: "افحص مخرجات Terminal وإذا كان هناك خطأ اشرح سببه"
   domain: "system_cli"
   complexity: "complex"
   requiresConfirmation: false
   reasoning: "قراءة مخرجات وفحص أخطاء السيرفر البرمجي"
+
+- الإدخال: "امسح ملف test.txt من الديسكتوب"
+  cleanText: "حذف ملف test.txt من Desktop"
+  domain: "file_office"
+  complexity: "simple"
+  requiresConfirmation: true
+  reasoning: "حذف ملف أمر حساس لا يمكن التراجع عنه"
+
+- الإدخال: "بص على الشاشة دلوقتي وقولي إيه اللي مفتوح قدامي باختصار"
+  cleanText: "التقط صورة للشاشة وصف ما هو مفتوح الآن باختصار"
+  domain: "vision"
+  complexity: "simple"
+  requiresConfirmation: false
+  reasoning: "التقاط وتحليل محتوى الشاشة بصرياً"
+
+- الإدخال: "افتح لينكد ان في وضع التخفي"
+  cleanText: "افتح LinkedIn في وضع Incognito"
+  domain: "browser"
+  complexity: "simple"
+  requiresConfirmation: false
+  reasoning: "فتح موقع في وضع التصفح الخفي خطوة واحدة"
 
 - الإدخال: "افتح لينكد إن واقفل فيسبوك واعمل ملء الشاشة"
   cleanText: "افتح LinkedIn واقفل Facebook واعمل ملء الشاشة"
@@ -153,7 +195,112 @@ const ROUTER_SYSTEM_PROMPT = `أنت "المصفّي والموجّه الدلا
   domain: "power"
   complexity: "simple"
   requiresConfirmation: false
-  reasoning: "قفل شاشة بسيط قابل للتراجع فورياً"`;
+  reasoning: "قفل شاشة بسيط قابل للتراجع فورياً"
+
+- الإدخال: "شوف port 3000 شغال عليه ايه"
+  cleanText: "فحص العمليات التي تعمل على port 3000"
+  domain: "system_cli"
+  complexity: "simple"
+  requiresConfirmation: false
+  reasoning: "فحص منفذ port في النظام"
+
+- الإدخال: "اقفل تاب بتاعة اليوتيوب"
+  cleanText: "اقفل تاب YouTube في المتصفح"
+  domain: "browser"
+  complexity: "simple"
+  requiresConfirmation: false
+  reasoning: "إغلاق تبويب موقع محدد في المتصفح"
+
+- الإدخال: "خش على بروفايلي في لينكد إن"
+  cleanText: "افتح بروفايل LinkedIn الشخصي https://www.linkedin.com/in/me/"
+  domain: "browser"
+  complexity: "simple"
+  requiresConfirmation: false
+  reasoning: "فتح رابط حساب لينكد إن في المتصفح"
+
+- الإدخال: "اقتل البروسيس بتاع نود"
+  cleanText: "إنهاء عملية node.exe (kill process)"
+  domain: "system_cli"
+  complexity: "simple"
+  requiresConfirmation: true
+  reasoning: "قتل عملية نظام أمر حساس يتطلب تأكيد"`;
+
+/**
+ * Pre-routing phonetic normalization for common Egyptian ASR misrecognitions:
+ * - "البوت 3000" / "بورد 3000" -> "port 3000"
+ * - "التابعة بتاعة اليوتيوب" / "التابع" -> "تاب"
+ */
+export function normalizeEgyptianTranscript(input) {
+  let text = String(input || '').trim();
+  if (!text) return '';
+
+  // 1. Normalize port misrecognitions ("البوت 3000", "بورت 5173", "بورد 8080" -> "port <num>")
+  text = text.replace(/(?:ال)?(?:بوت|بورت|بورد)\s*(\d{2,5})/gi, 'port $1');
+
+  // 2. Normalize tab misrecognitions ("التابعة بتاعة اليوتيوب", "التابع يوتيوب" -> "تاب")
+  text = text.replace(
+    /(?:ال)?تابع[ةه]?(?=\s*(?:بتاع[ةه]?|اليوتيوب|يوتيوب|جوجل|لينكد|فيسبوك|المتصفح|كروم|$))/gi,
+    'تاب'
+  );
+
+  return text.replace(/\s+/g, ' ').trim();
+}
+
+/**
+ * Apply deterministic domain & safety overrides after phonetic normalization
+ */
+function applyDeterministicOverrides(normalizedText, routeObj) {
+  const out = { ...routeObj };
+
+  // Port inspection / operations always belong to system_cli
+  if (/\bport\s+\d{2,5}\b/i.test(normalizedText)) {
+    out.domain = 'system_cli';
+  }
+
+  // Tab operations ("اقفل تاب اليوتيوب", "تاب بتاعة لينكد") belong to browser
+  if (/(?:اقفل|قفل|شيل|افتح|حدث|ريفرش)\s+(?:ال)?تاب(?:\s|$)/i.test(normalizedText)) {
+    out.domain = 'browser';
+  }
+
+  // "خش على <site>" / "ادخل على <site>" belongs to browser (unless playing a video explicitly)
+  if (
+    /(?:^|\s)(?:خش|ادخل)\s+على\s+\S+/i.test(normalizedText) &&
+    !/شغل\s+(?:فيديو|اغني|ماتش|ملخص|قران|قرآن)/i.test(normalizedText)
+  ) {
+    out.domain = 'browser';
+  }
+
+  // Desktop file/folder listing, folder creation, or file deletion belongs to file_office
+  if (
+    /(?:الملفات|ملفات|فولدر|مجلد|شيت|اكسيل|إكسيل|\.xlsx|\.txt|\.docx).*(?:الديسكتوب|ديسكتوب|سطح\s*المكتب)|(?:اعرض|وريني|افتح|امسح|احذف|اعمل\s*فولدر).*(?:الديسكتوب|ديسكتوب|سطح\s*المكتب)/i.test(
+      normalizedText
+    )
+  ) {
+    out.domain = 'file_office';
+  }
+
+  // Process kill ("اقتل البروسيس" / "انهي عملية" / "kill process") requires HITL confirmation
+  if (
+    /(?:اقتل|انهي|موت)\s+(?:ال)?(?:بروسيس|برسيس|عملي[ةه]|برنامج)|(?:\bkill\s+(?:process|pid|-9)\b)/i.test(
+      normalizedText
+    )
+  ) {
+    out.domain = 'system_cli';
+    out.requiresConfirmation = true;
+  }
+
+  // Enforce single-action commands in youtube, browser, power, file_office to ALWAYS be 'simple' -> gemini-3.1-flash-lite
+  // regardless of sentence length, unless genuinely chaining 2+ distinct cross-tool actions
+  if (['youtube', 'browser', 'power', 'file_office'].includes(out.domain)) {
+    const hasTrueMultiActionChain =
+      /\s+و(?:بعدين\s+)?(?:اقفل|شغل|علي|وطي|اعمل\s+ملء|اعمل\s+ميوت|روح|بص)\b/i.test(normalizedText);
+    if (!hasTrueMultiActionChain) {
+      out.complexity = 'simple';
+    }
+  }
+
+  return out;
+}
 
 /**
  * Routes a raw voice transcript through the fast semantic classifier (Gemini 3.1 Flash-Lite),
@@ -175,10 +322,11 @@ export async function routeCommand(rawTranscript) {
     };
   }
 
+  const normalizedInput = normalizeEgyptianTranscript(rawText);
   const desktopFiles = getDesktopFilesContext();
   const promptContent = [
-    `الطلب الصوتي الخام للمستخدم:`,
-    `"${rawText}"`,
+    `الطلب الصوتي للمستخدم (بعد التطبيع الصوتي المبدئي):`,
+    `"${normalizedInput}"`,
     ``,
     `ملفات سطح المكتب (Desktop) المتاحة حالياً على جهاز المستخدم:`,
     desktopFiles.length > 0 ? desktopFiles.map((f) => `- ${f}`).join('\n') : '(لا توجد ملفات حالياً على Desktop)',
@@ -191,41 +339,48 @@ export async function routeCommand(rawTranscript) {
       schema: routeOutputSchema,
       temperature: 0,
       primaryModel: 'gemini-3.1-flash-lite',
-      timeoutMs: 6000,
+      timeoutMs: 9000,
     });
 
-    const output = result.object;
+    const output = applyDeterministicOverrides(normalizedInput, result.object);
     const isComplex = output.complexity === 'complex';
 
-    // Model & Step budget assignment based on complexity:
-    // Simple: fast lightweight model (gemini-3.1-flash-lite), 1 step budget
-    // Complex: heavier reasoning model (gemma-4-31b-it), 5 steps budget
     const targetModel = isComplex ? 'gemma-4-31b-it' : 'gemini-3.1-flash-lite';
     const maxSteps = isComplex ? 5 : 1;
+    const timeoutMs = isComplex ? 12000 : 6000;
 
     return {
       rawText,
+      normalizedText: normalizedInput,
       cleanText: output.cleanText,
       domain: output.domain,
       complexity: output.complexity,
       requiresConfirmation: output.requiresConfirmation,
       targetModel,
       maxSteps,
+      timeoutMs,
       reasoning: output.reasoning,
       meta,
     };
   } catch (err) {
     console.error('[Router:routeCommand Error]:', err.message);
-    // Robust fallback if LLM routing fails: treat as simple chat or direct text
-    return {
-      rawText,
-      cleanText: rawText,
+    const fallbackOut = applyDeterministicOverrides(normalizedInput, {
+      cleanText: normalizedInput,
       domain: 'chat',
       complexity: 'simple',
       requiresConfirmation: false,
+      reasoning: 'توجيه احتياطي لتعذر الاتصال بالمصفّي',
+    });
+    return {
+      rawText,
+      normalizedText: normalizedInput,
+      cleanText: fallbackOut.cleanText,
+      domain: fallbackOut.domain,
+      complexity: fallbackOut.complexity,
+      requiresConfirmation: fallbackOut.requiresConfirmation,
       targetModel: 'gemini-3.1-flash-lite',
       maxSteps: 1,
-      reasoning: 'توجيه احتياطي لتعذر الاتصال بالمصفّي',
+      reasoning: fallbackOut.reasoning,
       meta: { error: err.message },
     };
   }
@@ -239,24 +394,23 @@ export async function routeCommand(rawTranscript) {
 export function filterToolsByDomain(allTools, domain, complexity) {
   if (!allTools || typeof allTools !== 'object') return allTools;
 
-  // Pure conversation in simple mode does not need tools
-  if (domain === 'chat' && complexity === 'simple') {
+  // Pure conversation (chat) needs 0 tools
+  if (domain === 'chat') {
     return {};
   }
 
-  // Primary 2-3 tools mapping per domain
+  // Dedicated tools per domain (<= 3 tools for simple tasks)
   const domainToolMap = {
-    youtube: ['playYoutubeVideo', 'controlMedia'],
-    browser: ['openWebsite', 'controlMedia'],
-    system_cli: ['openApp', 'getSystemStatus'],
-    file_office: ['openApp', 'getSystemStatus'],
-    power: ['requestPowerAction', 'controlMedia'],
-    vision: ['controlMagnifier', 'getSystemStatus'],
-    chat: ['getSystemStatus'],
+    youtube: ['playYoutubeVideo', 'controlMediaPlayback'],
+    browser: ['openBrowserUrl', 'browserTabAction'],
+    file_office: ['updateExcelCell', 'fileOperation'],
+    vision: ['captureAndAnalyzeScreen', 'controlMagnifier'],
+    system_cli: ['openApplication', 'runTerminalCommand', 'listOrKillProcess'],
+    power: ['controlPower', 'controlMediaPlayback'],
   };
 
   if (complexity === 'simple') {
-    const allowed = domainToolMap[domain] || ['controlMedia', 'openApp'];
+    const allowed = domainToolMap[domain] || [];
     const filtered = {};
     for (const toolName of allowed) {
       if (allTools[toolName]) {
@@ -266,17 +420,24 @@ export function filterToolsByDomain(allTools, domain, complexity) {
     return filtered;
   }
 
-  // Complex tasks: include domain tools plus related operational tools
-  const complexAllowed = new Set([
-    ...(domainToolMap[domain] || []),
-    'controlMedia',
-    'openApp',
-    'openWebsite',
-    'getSystemStatus',
-    'requestPowerAction',
-    'controlMagnifier',
-    'playYoutubeVideo',
-  ]);
+  // Complex tasks: domain tools + related cross-domain operational tools
+  const relatedDomainsMap = {
+    youtube: ['youtube', 'browser'],
+    browser: ['browser', 'youtube'],
+    file_office: ['file_office', 'system_cli'],
+    vision: ['vision', 'system_cli', 'browser'],
+    system_cli: ['system_cli', 'file_office', 'power'],
+    power: ['power', 'system_cli'],
+  };
+
+  const related = relatedDomainsMap[domain] || [domain];
+  const complexAllowed = new Set();
+  for (const d of related) {
+    for (const t of (domainToolMap[d] || [])) {
+      complexAllowed.add(t);
+    }
+  }
+  complexAllowed.add('getSystemStatus');
 
   const filtered = {};
   for (const [toolName, toolObj] of Object.entries(allTools)) {

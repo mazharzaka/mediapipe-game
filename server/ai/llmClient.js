@@ -1,9 +1,10 @@
 import dotenv from 'dotenv';
 import path from 'path';
 import { fileURLToPath } from 'url';
-import { generateText, generateObject } from 'ai';
+import { generateText, generateObject, stepCountIs } from 'ai';
 import { createGoogleGenerativeAI } from '@ai-sdk/google';
 import { createGroq } from '@ai-sdk/groq';
+import { createOpenAI } from '@ai-sdk/openai';
 
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
@@ -17,6 +18,7 @@ export const QUOTA_LIMITS = {
   'gemini-3.1-flash-lite': { rpm: 15, rpd: 1000, provider: 'google' },
   'gemma-4-31b-it': { rpm: 30, rpd: 1000, provider: 'google' },
   'openai/gpt-oss-120b': { rpm: 30, rpd: 1000, provider: 'groq' },
+  'openrouter/free': { rpm: 20, rpd: 500, provider: 'openrouter' },
 };
 
 function getTodayString() {
@@ -94,14 +96,23 @@ class QuotaTracker {
   getStats(specificModel = null) {
     const today = getTodayString();
     const stats = {};
+    let totalDailyUsed = 0;
+
     for (const [name, state] of Object.entries(this.models)) {
       this.cleanOldTimestamps(state);
       this.checkDayRollover(state);
+      const rpmUsed = state.timestamps.length;
+      const dailyUsed = state.rpd;
+      totalDailyUsed += dailyUsed;
+
       stats[name] = {
         provider: state.provider,
-        rpm: state.timestamps.length,
+        rpm: rpmUsed,
+        rpmUsed,
         rpmLimit: state.rpmLimit,
-        rpd: state.rpd,
+        rpd: dailyUsed,
+        dailyUsed,
+        dailyLimit: state.rpdLimit,
         rpdLimit: state.rpdLimit,
         totalRequests: state.totalRequests,
         failedRequests: state.failedRequests,
@@ -114,8 +125,11 @@ class QuotaTracker {
         stats[specificModel] || {
           model: specificModel,
           rpm: 0,
+          rpmUsed: 0,
           rpmLimit: 30,
           rpd: 0,
+          dailyUsed: 0,
+          dailyLimit: 1000,
           rpdLimit: 1000,
           totalRequests: 0,
           failedRequests: 0,
@@ -127,6 +141,7 @@ class QuotaTracker {
     return {
       timestamp: Date.now(),
       date: today,
+      totalDailyUsed,
       models: stats,
     };
   }
@@ -252,6 +267,13 @@ function getModelInstance(modelName, provider, options = {}) {
     const apiKey = getGroqApiKey(options.groqApiKeyOverride);
     const groq = createGroq({ apiKey });
     return groq(modelName);
+  } else if (provider === 'openrouter') {
+    const apiKey = (process.env.OPENROUTER_API_KEY || '').trim();
+    const openrouter = createOpenAI({
+      baseURL: 'https://openrouter.ai/api/v1',
+      apiKey,
+    });
+    return openrouter(modelName === 'openrouter/free' ? 'meta-llama/llama-3.3-70b-instruct:free' : modelName);
   }
   throw new Error(`مزود غير مدعوم: ${provider}`);
 }
@@ -262,10 +284,22 @@ function getModelInstance(modelName, provider, options = {}) {
 export async function executeWithFallback(operationFn, options = {}) {
   const primaryModel = options.primaryModel || 'gemini-3.1-flash-lite';
   const fallbackModel = 'openai/gpt-oss-120b';
+  const openRouterKey = (process.env.OPENROUTER_API_KEY || '').trim();
+
+  const primaryTimeout = options.timeoutMs || (primaryModel === 'gemma-4-31b-it' ? 12000 : 6000);
+
+  const getProviderForModel = (m) => {
+    if (m.startsWith('openrouter/')) return 'openrouter';
+    if (m.startsWith('openai/') || m.includes('gpt') || m.includes('llama') || m.includes('oss')) return 'groq';
+    return 'google';
+  };
+
+  const primaryProvider = getProviderForModel(primaryModel);
 
   const candidates = [
-    { modelName: primaryModel, provider: 'google' },
-    ...(primaryModel !== fallbackModel ? [{ modelName: fallbackModel, provider: 'groq' }] : []),
+    { modelName: primaryModel, provider: primaryProvider, timeoutMs: primaryTimeout },
+    ...(primaryModel !== fallbackModel ? [{ modelName: fallbackModel, provider: 'groq', timeoutMs: 15000 }] : []),
+    ...(openRouterKey ? [{ modelName: 'openrouter/free', provider: 'openrouter', timeoutMs: 15000 }] : []),
   ];
 
   let fallbackTriggered = false;
@@ -275,7 +309,7 @@ export async function executeWithFallback(operationFn, options = {}) {
   for (let i = 0; i < candidates.length; i++) {
     const candidate = candidates[i];
     const isFallback = i > 0;
-    const timeoutMs = options.timeoutMs || 6000;
+    const timeoutMs = candidate.timeoutMs || options.timeoutMs || 6000;
     const t0 = Date.now();
 
     try {
@@ -312,6 +346,23 @@ export async function executeWithFallback(operationFn, options = {}) {
     } catch (err) {
       lastError = err;
       quotaTracker.recordFailure(candidate.modelName);
+
+      // Only wait & retry on 429 when we are on the LAST candidate (so primary 429 fails over to Groq in 0ms!)
+      const isLastCandidate = i === candidates.length - 1;
+      const isRateLimit = err.statusCode === 429 || err.status === 429 || /429|rate limit/i.test(err.message || '');
+      candidate._retryCount = candidate._retryCount || 0;
+      if (isLastCandidate && isRateLimit && candidate._retryCount < 4) {
+        const headerRetry = Number(err.responseHeaders?.get?.('retry-after') || err.headers?.['retry-after'] || 0);
+        const msgMatch = (err.message || '').match(/try(?:ing)? again in\s+([\d.]+)s|retry in\s+([\d.]+)s/i);
+        const parsedFromMsg = msgMatch ? Math.ceil(Number(msgMatch[1] || msgMatch[2])) : 0;
+        const parsedSec = headerRetry || parsedFromMsg || 6;
+        const retrySec = Math.min(Math.max(parsedSec, 2), 25);
+        console.warn(`[llmClient] ⏳ Rate limit on final candidate (${candidate.modelName}). Waiting ${retrySec}s before retry (${candidate._retryCount + 1}/4)...`);
+        await new Promise((r) => setTimeout(r, (retrySec + 2) * 1000));
+        candidate._retryCount += 1;
+        i--;
+        continue;
+      }
 
       if (i < candidates.length - 1) {
         fallbackTriggered = true;
@@ -366,7 +417,10 @@ export async function generateTextWithFallback({
       if (messages !== undefined) callParams.messages = messages;
       if (system !== undefined) callParams.system = system;
       if (tools !== undefined) callParams.tools = tools;
-      if (maxSteps !== undefined) callParams.maxSteps = maxSteps;
+      if (maxSteps !== undefined) {
+        callParams.maxSteps = maxSteps;
+        callParams.stopWhen = extra.stopWhen || stepCountIs(maxSteps);
+      }
       if (temperature !== undefined) callParams.temperature = temperature;
 
       return await generateText(callParams);
