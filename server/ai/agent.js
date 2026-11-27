@@ -6,12 +6,12 @@ import { aiTools } from "./tools.js";
 import { generateTextWithFallback } from "./llmClient.js";
 import { resolveSmartUrl, normalizeTabTargetTitle } from "./tools/browserTools.js";
 
-const SYSTEM_PROMPT = `أنت "مساعد الفرجة والاسترخاء والتحكم الذكي زاقا (ZAKA)" المدمج في نظام التحكم المساعد (Assistive System).
+const SYSTEM_PROMPT = `أنت "مساعد الفرجة والاسترخاء والتحكم الذكي ظاظا (ZAZA)" المدمج في نظام التحكم المساعد (Assistive System).
 مهمتك الأساسية هي مساعدة المستخدم في التحكم في الكمبيوتر، تشغيل الفيديوهات والميديا، والتطبيقات بسهولة وسرعة باللغة العربية وباللهجة المصرية الودودة والعملية.
 
 قواعد وتعليمات العمل الصارمة:
 1. تحدث باللغة العربية وباللهجة المصرية الودودة والمهذبة والمختصرة جداً (مثال: "عيوني يا باشا! شغلتلك الفيديو 🍿", "تمام يا فندم! فتحتلك اللينك", "قفلتهولك خلاص").
-2. استدعِ الأداة المناسبة دائماً عبر نظام استدعاء الأدوات (Tool Calling) الأصلي، وإياك أن تطبع كود JSON خام في نص الرد للمستخدم.
+2. استدعِ الأداة المناسبة دائماً عبر نظام استدعاء الأدوات (Tool Calling) الأصلي، وإياك أن تطبع كود JSON خام في نص الرد للمستخدم، وإياك أن تدّعي فتح يوتيوب أو تشغيل فيديو بالكتابة فقط بدون استدعاء أداة playYoutubeVideo فعلياً.
 3. صناديق الأدوات الأساسية وإدارة النظام:
    - playYoutubeVideo: للبحث عن أي فيديو أو ملخص ماتش أو أغنية على يوتيوب وتشغيله مباشرة.
    - controlMediaPlayback: للتحكم في الصوت وتشغيل الوسائط (play_pause, mute, volume_up, volume_down, next).
@@ -545,7 +545,7 @@ export async function runAgent({
 
   let finalText = result.text || "";
 
-  // Safety Net: If model leaked raw JSON tool call without invoking native tool calling, execute & strip JSON!
+  // Safety Net 1: If model leaked raw JSON tool call without invoking native tool calling, execute & strip JSON!
   if (toolCalls.length === 0 && hasTools && finalText) {
     const recovery = await recoverLeakedJsonTools(finalText, effectiveTools);
     if (recovery.wasRecovered) {
@@ -553,6 +553,39 @@ export async function runAgent({
       toolCalls = recovery.recoveredCalls;
       toolResults = recovery.recoveredResults;
     }
+  }
+
+  // Safety Net 2 (Anti-Hallucination Guard for YouTube domain):
+  // Never allow a fake text-only reply in the youtube domain without actually executing playYoutubeVideo!
+  if (domain === "youtube" && toolCalls.length === 0 && effectiveTools?.playYoutubeVideo?.execute) {
+    const sanitizedQuery = String(prompt || "")
+      .replace(/^(?:افتح|شغل)(?:\s+(?:لي|لنا))?\s+(?:ال)?يوتيوب\s*(?:على|عن)?\s*/i, "")
+      .trim();
+    const args = { query: sanitizedQuery || "YouTube" };
+    console.warn(
+      `[Agent YouTube Guard] Model answered with text only without tool call. Enforcing playYoutubeVideo(${JSON.stringify(args)})`
+    );
+    const execOut = await effectiveTools.playYoutubeVideo.execute(args);
+    const callId = `yt_guard_${Date.now()}`;
+    toolCalls.push({
+      type: "tool-call",
+      toolCallId: callId,
+      toolName: "playYoutubeVideo",
+      args,
+      input: args,
+      enforcedByGuard: true,
+    });
+    toolResults.push({
+      type: "tool-result",
+      toolCallId: callId,
+      toolName: "playYoutubeVideo",
+      args,
+      input: args,
+      result: execOut,
+      output: execOut,
+      enforcedByGuard: true,
+    });
+    finalText = execOut?.message || finalText || "✓ تم فتح يوتيوب في المقدمة يا باشا!";
   }
 
   // When maxSteps === 1 finishes immediately after executing the required tool on Step 0, surface the tool's Arabic message cleanly

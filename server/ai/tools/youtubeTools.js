@@ -1,6 +1,6 @@
 import { tool } from 'ai';
 import { z } from 'zod';
-import { exec, spawn } from 'child_process';
+import { exec, execFile, spawn } from 'child_process';
 import fs from 'fs';
 import path from 'path';
 
@@ -68,15 +68,22 @@ export function bringBrowserWindowToFront(preferredTitlePattern = 'YouTube|Chrom
 }
 
 /**
- * Launch a URL reliably in Chrome via direct child_process.spawn, with PowerShell Start-Process fallback (never cmd.exe).
+ * Launch a URL reliably in Windows foreground via PowerShell Start-Process (execFile),
+ * with Chrome direct spawn for extra flags like --incognito, followed by foreground window focus.
  */
 export async function launchUrlInChromeForeground(targetUrl, extraChromeArgs = [], focusPattern = 'Chrome') {
+  const safeUrl = String(targetUrl || '').trim();
+  if (!safeUrl) {
+    return { success: false, error: 'URL is empty' };
+  }
+
   const chromeExe = findWindowsChromeExecutable();
 
-  if (chromeExe) {
+  // If extra Chrome arguments (e.g. --incognito) are requested, launch Chrome directly with them
+  if (extraChromeArgs.length > 0 && chromeExe) {
     const launched = await new Promise((resolve) => {
       try {
-        const child = spawn(chromeExe, [...extraChromeArgs, targetUrl], {
+        const child = spawn(chromeExe, [...extraChromeArgs, safeUrl], {
           detached: true,
           shell: false,
           windowsHide: false,
@@ -115,17 +122,12 @@ export async function launchUrlInChromeForeground(targetUrl, extraChromeArgs = [
     }
   }
 
-  // Fallback: PowerShell Start-Process (avoids cmd.exe '&' URL truncation)
-  const safeUrl = targetUrl.replace(/'/g, "''");
-  const psFallback = chromeExe
-    ? `Start-Process -FilePath '${chromeExe.replace(/'/g, "''")}' -ArgumentList '${safeUrl}'`
-    : `Start-Process -FilePath '${safeUrl}'`;
-  const encodedFallback = Buffer.from(psFallback, 'utf16le').toString('base64');
-
+  // Primary Windows foreground launch via PowerShell Start-Process (avoids cmd.exe '&' truncation)
   const psRes = await new Promise((resolve) => {
-    exec(
-      `powershell -NoProfile -EncodedCommand ${encodedFallback}`,
-      { shell: 'cmd.exe', timeout: 6000 },
+    execFile(
+      'powershell.exe',
+      ['-NoProfile', '-WindowStyle', 'Hidden', '-Command', `Start-Process '${safeUrl.replace(/'/g, "''")}'`],
+      { timeout: 6000 },
       (err) => {
         if (err) {
           resolve({ success: false, error: err.message });
@@ -140,28 +142,94 @@ export async function launchUrlInChromeForeground(targetUrl, extraChromeArgs = [
     const focusInfo = await bringBrowserWindowToFront(focusPattern);
     return { ...psRes, foreground: focusInfo.focused };
   }
+
+  // Secondary fallback: direct Chrome spawn if Start-Process failed
+  if (chromeExe) {
+    const launched = await new Promise((resolve) => {
+      try {
+        const child = spawn(chromeExe, [safeUrl], {
+          detached: true,
+          shell: false,
+          windowsHide: false,
+          stdio: 'ignore',
+        });
+        let settled = false;
+        child.once('error', (err) => {
+          if (!settled) {
+            settled = true;
+            resolve({ success: false, error: err.message });
+          }
+        });
+        child.once('spawn', () => {
+          child.unref();
+          if (!settled) {
+            settled = true;
+            resolve({ success: true, method: 'chrome_spawn', executable: chromeExe, pid: child.pid });
+          }
+        });
+      } catch (err) {
+        resolve({ success: false, error: err.message });
+      }
+    });
+    if (launched.success) {
+      const focusInfo = await bringBrowserWindowToFront(focusPattern);
+      return { ...launched, foreground: focusInfo.focused };
+    }
+  }
+
   return psRes;
 }
 
 /**
- * AI Tool: Search YouTube, extract clean VIDEO_ID, open directly in Chrome, and bring window to foreground
+ * AI Tool: Open YouTube homepage or search YouTube, extract clean VIDEO_ID, open in foreground
  */
 export const playYoutubeVideo = tool({
   description:
-    'البحث عن أي فيديو أو أغنية أو ملخص ماتش أو فيلم أو قرآن على يوتيوب وتشغيله مباشرة في نافذة Google Chrome نشطة في المقدمة.',
+    'فتح موقع يوتيوب (الصفحة الرئيسية) أو البحث عن أي فيديو أو أغنية أو ملخص ماتش أو فيلم أو قرآن على يوتيوب وتشغيله مباشرة في مقدمة ويندوز.',
   inputSchema: z.object({
     query: z
       .string()
-      .describe('نص أو جملة البحث عن الفيديو على يوتيوب (مثال: ملخص ماتش الأهلي والزمالك، سورة الكهف، عمرو دياب)'),
+      .optional()
+      .default('')
+      .describe('نص أو جملة البحث عن الفيديو على يوتيوب (مثال: ملخص ماتش الأهلي والزمالك، سورة الكهف، عمرو دياب)، أو اتركه فارغاً / "youtube" لفتح الصفحة الرئيسية ليوتيوب'),
   }),
-  execute: async ({ query }) => {
+  execute: async ({ query = '' }) => {
     const cleanQuery = String(query || '')
       .replace(/["'`<>]/g, ' ')
       .replace(/\s+/g, ' ')
       .trim();
 
-    if (!cleanQuery) {
-      return { success: false, message: 'من فضلك وضح اسم الفيديو أو محتوى البحث المطلوب.' };
+    const isHomepageRequest =
+      !cleanQuery ||
+      /^(?:(?:افتح|شغل)(?:\s+(?:لي|لنا))?\s+)?(?:ال)?(?:يوتيوب|youtube(?:\.com)?)(?:\s+(?:الرئيسي[ةه]|العادي|فقط|بس))?$/i.test(
+        cleanQuery,
+      ) ||
+      /^(?:home|homepage|الرئيسي[ةه])$/i.test(cleanQuery);
+
+    if (isHomepageRequest) {
+      const homeUrl = 'https://www.youtube.com/';
+      const launchResult = await launchUrlInChromeForeground(homeUrl, [], 'YouTube|Chrome');
+      if (!launchResult.success) {
+        return {
+          success: false,
+          query: cleanQuery || 'YouTube',
+          url: homeUrl,
+          error: launchResult.error,
+          message: `فشل فتح يوتيوب في المتصفح: ${launchResult.error}`,
+        };
+      }
+      return {
+        success: true,
+        query: cleanQuery || 'YouTube',
+        videoId: null,
+        url: homeUrl,
+        directVideo: false,
+        homepage: true,
+        method: launchResult.method,
+        pid: launchResult.pid || null,
+        foreground: Boolean(launchResult.foreground),
+        message: '✓ تم فتح يوتيوب في المقدمة يا باشا! 🎬',
+      };
     }
 
     const fallbackSearchUrl = `https://www.youtube.com/results?search_query=${encodeURIComponent(cleanQuery)}`;

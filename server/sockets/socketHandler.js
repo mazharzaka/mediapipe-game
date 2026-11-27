@@ -12,112 +12,12 @@ import { getQuotaStats } from "../ai/llmClient.js";
 import { routeCommand, filterToolsByDomain } from "../ai/router.js";
 import { aiTools } from "../ai/tools.js";
 import { controlMediaPlayback } from "../ai/tools/youtubeTools.js";
+import { matchZeroTokenFastPath } from "../ai/fastPath.js";
+
+export { matchZeroTokenFastPath };
 
 // Keep track of pending confirmation actions per socket
 const pendingActionsMap = new Map();
-
-/**
- * Zero-Token Local Fast Path Matcher:
- * Matches direct single-intent media & volume commands in Egyptian Arabic / English
- * without consuming any Gemini or Groq API quota.
- */
-export function matchZeroTokenFastPath(rawPrompt) {
-  if (!rawPrompt || typeof rawPrompt !== "string") return null;
-
-  // Normalize diacritics, alef forms, punctuation, and strip optional ZAKA wake-word prefix or polite fillers
-  let cleaned = rawPrompt
-    .trim()
-    .replace(/[\u064B-\u065F\u0640]/g, "")
-    .replace(/[أإآ]/g, "ا")
-    .replace(/[ة]/g, "ه")
-    .replace(/[؟?!.,،]+/g, " ")
-    .replace(/^(?:يا\s*)?(?:زاقا|زاكا|زكا|زقه|ذكا|زكاء|ذاكره|ذاكرة|zaka|zaqa)\s*/i, "")
-    .replace(/\b(?:لو\s*سمحت|بعد\s*اذنك|من\s*فضلك|يا\s*باشا|دلوقتي|حالا)\b/gi, "")
-    .replace(/\s+/g, " ")
-    .trim();
-
-  if (!cleaned) return null;
-
-  // Do NOT hijack compound multi-step commands (e.g. "شغل ملخص ماتش وعلي الصوت")
-  if (/\s+و(?:شغل|افتح|اقفل|اعمل|جيب|هات|بص)\b/i.test(cleaned)) {
-    return null;
-  }
-
-  // 1. Volume Up: علي الصوت / زود الصوت / ارفع الصوت (7 consecutive pulses = ~14%)
-  if (/^(?:علي|زود|ارفع)\s+الصوت(?:\s+(?:شويه|كمان|اكتر|سنه|قوي))?$/i.test(cleaned)) {
-    const isStrong = /كمان|اكتر|قوي/.test(cleaned);
-    return {
-      action: "volume_up",
-      repeat: isStrong ? 10 : 7,
-      reply: "🔊 علّيت الصوت فوراً (+14% مسار محلي مجاني).",
-    };
-  }
-
-  // 2. Volume Down: وطي الصوت / قلل الصوت / نزل الصوت / اخفض الصوت (7 consecutive pulses = ~14%)
-  if (/^(?:وطي|قلل|نزل|اخفض|هدي)\s+الصوت(?:\s+(?:شويه|كمان|سنه|خالص))?$/i.test(cleaned)) {
-    const isStrong = /كمان|خالص/.test(cleaned);
-    return {
-      action: "volume_down",
-      repeat: isStrong ? 10 : 7,
-      reply: "🔉 وطّيت الصوت فوراً (-14% مسار محلي مجاني).",
-    };
-  }
-
-  // 3. Mute / Unmute: اعمل ميوت / اكتم الصوت / ميوت
-  if (/^(?:(?:اعمل\s+)?ميوت|اكتم(?:\s+الصوت)?|كتم\s+الصوت|mute)$/i.test(cleaned)) {
-    return {
-      action: "mute",
-      repeat: 1,
-      reply: "🔇 تم كتم/إلغاء كتم الصوت فوراً (مسار محلي مجاني).",
-    };
-  }
-
-  // 4. Play / Pause: وقف الفيديو / شغل الفيديو / بوز / كمل الفيديو
-  if (
-    /^(?:وقف(?:\s+(?:الفيديو|الميديا|التشغيل|الصوت))?|شغل\s+الفيديو|كمل(?:\s+(?:الفيديو|التشغيل))?|استمر|بوز|ستوب|pause|resume)$/i.test(
-      cleaned,
-    )
-  ) {
-    return {
-      type: "media",
-      action: "play_pause",
-      repeat: 1,
-      reply: "⏯️ تم إيقاف/تشغيل الفيديو فوراً (مسار محلي مجاني).",
-    };
-  }
-
-  // 5. Scroll Down: انزل تحت / انزل تحت شوية / سكرول لتحت / نزل الصفحة / scroll down
-  if (
-    /^(?:انزل(?:\s+(?:تحت|لتحت))?|سكرول\s+(?:تحت|لتحت)|نزل\s+الصفحه|scroll\s+down)(?:\s+(?:شويه|كمان|اكتر|سنه))*$/i.test(
-      cleaned,
-    )
-  ) {
-    return {
-      type: "scroll",
-      action: "scroll_down",
-      direction: "down",
-      amount: 5,
-      reply: "⬇️ تم التمرير لأسفل فوراً (مسار محلي مجاني).",
-    };
-  }
-
-  // 6. Scroll Up: اطلع فوق / اطلع فوق شوية / سكرول لفوق / طلع الصفحة / scroll up
-  if (
-    /^(?:اطلع(?:\s+(?:فوق|لفوق))?|سكرول\s+(?:فوق|لفوق)|طلع\s+الصفحه|scroll\s+up)(?:\s+(?:شويه|كمان|اكتر|سنه))*$/i.test(
-      cleaned,
-    )
-  ) {
-    return {
-      type: "scroll",
-      action: "scroll_up",
-      direction: "up",
-      amount: 5,
-      reply: "⬆️ تم التمرير لأعلى فوراً (مسار محلي مجاني).",
-    };
-  }
-
-  return null;
-}
 
 export function setupSocketHandler(io) {
   io.on("connection", (socket) => {
@@ -650,6 +550,30 @@ export function setupSocketHandler(io) {
                 }
                 socket.emit("ai_stream_chunk", { chunk: "", fullText, pendingAction });
               }
+            }
+
+            // Anti-Hallucination Guard for YouTube domain: never allow fake text-only reply without executing playYoutubeVideo
+            if (
+              effectiveDomain === "youtube" &&
+              executedTools.length === 0 &&
+              filteredTools?.playYoutubeVideo?.execute
+            ) {
+              const sanitizedQuery = String(effectiveText || prompt || "")
+                .replace(/^(?:افتح|شغل)(?:\s+(?:لي|لنا))?\s+(?:ال)?يوتيوب\s*(?:على|عن)?\s*/i, "")
+                .trim();
+              const ytArgs = { query: sanitizedQuery || "YouTube" };
+              console.warn(
+                `[Socket YouTube Guard] Enforcing playYoutubeVideo(${JSON.stringify(ytArgs)}) to prevent fake text reply.`
+              );
+              const ytOut = await filteredTools.playYoutubeVideo.execute(ytArgs);
+              const ytInfo = { name: "playYoutubeVideo", args: ytArgs, result: ytOut };
+              executedTools.push(ytInfo);
+              fullText = ytOut?.message || fullText || "✓ تم فتح يوتيوب في المقدمة يا باشا!";
+              socket.emit("ai_stream_chunk", {
+                chunk: "",
+                fullText,
+                toolCompleted: ytInfo,
+              });
             }
 
             streamSucceeded = true;

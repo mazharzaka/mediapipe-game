@@ -252,6 +252,11 @@ export function normalizeEgyptianTranscript(input) {
 function applyDeterministicOverrides(normalizedText, routeObj) {
   const out = { ...routeObj };
 
+  // Opening YouTube homepage or searching YouTube always belongs to youtube domain
+  if (/(?:افتح|شغل)(?:\s+(?:لي|لنا))?\s+(?:ال)?يوتيوب|\bopen\s+youtube\b/i.test(normalizedText)) {
+    out.domain = 'youtube';
+  }
+
   // Port inspection / operations always belong to system_cli
   if (/\bport\s+\d{2,5}\b/i.test(normalizedText)) {
     out.domain = 'system_cli';
