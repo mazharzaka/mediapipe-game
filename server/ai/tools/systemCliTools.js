@@ -74,11 +74,11 @@ export function resolveAppExecutable(appName) {
  */
 export const openApplication = tool({
   description:
-    'فتح البرامج والتطبيقات على Windows (VS Code, Antigravity, Chrome, Terminal, Calculator, Explorer, Notepad) مع دعم تمرير مسار مجلد أو ملف لفتحه داخل التطبيق (مثل فتح مجلد مشروع في VS Code أو Antigravity).',
+    'فتح البرامج والتطبيقات على Windows (VS Code, Antigravity, Chrome, Terminal, Calculator, Explorer, Notepad) مع دعم تمرير مسار مجلد أو ملف اختياري. أمثلة: "افتح في اس كود" (app: "VS Code"), "افتح الحاسبة" (app: "Calculator"), "open terminal" (app: "Terminal").',
   inputSchema: z.object({
     app: z
       .enum(['VS Code', 'Antigravity', 'Chrome', 'Terminal', 'Calculator', 'Explorer', 'Notepad'])
-      .describe('اسم البرنامج المراد فتحه'),
+      .describe('اسم البرنامج المراد فتحه (VS Code | Antigravity | Chrome | Terminal | Calculator | Explorer | Notepad)'),
     path: z
       .string()
       .optional()
@@ -99,7 +99,7 @@ export const openApplication = tool({
         args.push(effectivePath);
       }
 
-      console.log(`[systemCliTools:openApplication] Spawning ${app} (${exe}) with args:`, args);
+      console.log(`[Tool:openApplication] Spawning ${app} (${exe}) with args:`, args);
 
       const child = spawn(exe, args, {
         detached: true,
@@ -108,20 +108,25 @@ export const openApplication = tool({
       });
       child.unref();
 
-      const details = effectivePath ? ` مع المسار: ${effectivePath}` : '';
+      const detailsText = effectivePath ? ` مع المسار: ${effectivePath}` : '';
       return {
         success: true,
+        action: 'open_application',
+        details: { app, executable: exe, path: effectivePath },
+        error: null,
         app,
         executable: exe,
         path: effectivePath,
-        message: `✓ تم تشغيل تطبيق ${app} بنجاح${details}.`,
+        message: `✓ تم تشغيل تطبيق ${app} بنجاح${detailsText}.`,
       };
     } catch (err) {
-      console.error(`[systemCliTools:openApplication Error]:`, err.message);
+      console.error(`[Tool:openApplication Error]:`, err.message);
       return {
         success: false,
-        app,
+        action: 'open_application',
+        details: { app, path: effectivePath },
         error: `فشل فتح تطبيق ${app}: ${err.message}`,
+        app,
       };
     }
   },

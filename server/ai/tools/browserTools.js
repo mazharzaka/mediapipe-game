@@ -80,7 +80,7 @@ export function normalizeTabTargetTitle(rawTarget) {
  */
 export const openBrowserUrl = tool({
   description:
-    'فتح موقع إلكتروني معروف (لينكد إن، بروفايل لينكد إن https://www.linkedin.com/in/me/، جيت هاب، شات جي بي تي، فيسبوك، جوجل) أو رابط أو بحث في متصفح Google Chrome مع دعم التصفح الخفي (incognito: true).',
+    'فتح موقع إلكتروني أو رابط أو بحث جوجل في مقدمة ويندوز عبر Chrome/Start-Process. أمثلة: "افتح لينكد إن" (url: "linkedin"), "افتح جيت هاب" (url: "github"), "افتح شات جي بي تي" (url: "chatgpt"), "open google incognito" (incognito: true).',
   inputSchema: z.object({
     url: z
       .string()
@@ -96,25 +96,36 @@ export const openBrowserUrl = tool({
   execute: async ({ url, incognito = false }) => {
     const targetUrl = resolveSmartUrl(url);
     if (!targetUrl) {
-      return { success: false, message: 'يرجى تحديد رابط الموقع أو كلمة البحث.' };
+      return {
+        success: false,
+        action: 'open_browser_url',
+        details: { rawUrl: url },
+        error: 'URL is empty',
+        message: 'يرجى تحديد رابط الموقع أو كلمة البحث.',
+      };
     }
 
     const extraArgs = incognito ? ['--incognito'] : [];
-    console.log(`[browserTools:openBrowserUrl] Opening ${targetUrl} (incognito=${Boolean(incognito)})`);
+    console.log(`[Tool:openBrowserUrl] Opening ${targetUrl} (incognito=${Boolean(incognito)})`);
 
     const launchRes = await launchUrlInChromeForeground(targetUrl, extraArgs, 'Chrome');
     if (!launchRes.success) {
       return {
         success: false,
+        action: 'open_browser_url',
+        details: { url: targetUrl, incognito: Boolean(incognito) },
+        error: launchRes.error,
         url: targetUrl,
         incognito: Boolean(incognito),
-        error: launchRes.error,
         message: `فشل فتح المتصفح: ${launchRes.error}`,
       };
     }
 
     return {
       success: true,
+      action: 'open_browser_url',
+      details: { url: targetUrl, incognito: Boolean(incognito), method: launchRes.method, foreground: Boolean(launchRes.foreground) },
+      error: null,
       url: targetUrl,
       incognito: Boolean(incognito),
       method: launchRes.method,

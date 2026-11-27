@@ -11,6 +11,30 @@ export const WAKE_WORD_STRIP_REGEX =
   /^(?:(?:إيه|ايه|ألو|الو|يا|ازيك|إزيك|هاي|هالو|hey|hi|ok|okay|yo)\s+)*(?:ظاظا|ظاظه|ظاظة|زازا|زازه|زازة|زوزو|زوزه|زوزة|ذاذا|سازه|زاقا|زاكا|زكا|زكى|زكي|زادكا|zaza|zozo|zaka|zaqa)[،,!\.\?\s]*/i;
 
 /**
+ * Spatial & Visual Screen Intent Detector:
+ * Returns true if the user refers to visual/spatial elements currently visible on screen
+ * (e.g. "من ناحية اليمين", "على الشمال", "أول فيديو قدامك", "التاني", "اضغط على", "دوس على",
+ *  "إنت شايف إيه", "بص على الشاشة", "اقرأ الشاشة").
+ * Must be routed to Vision + Screen interaction — NEVER to YouTube search!
+ */
+export function isSpatialOrVisualScreenIntent(rawText) {
+  if (!rawText || typeof rawText !== "string") return false;
+  const normalized = rawText
+    .replace(/[\u064B-\u065F\u0640]/g, "")
+    .replace(/[أإآ]/g, "ا")
+    .replace(/[ة]/g, "ه")
+    .replace(/\s+/g, " ")
+    .trim();
+
+  if (!normalized) return false;
+
+  const spatialVisualRegex =
+    /(?:من\s+ناحي[هة]\s+(?:اليمين|الشمال|اليسار)|(?:على|عال)\s*(?:اليمين|الشمال|اليسار)|ناحي[هة]\s+(?:اليمين|الشمال|اليسار)|(?:اول|تاني|ثاني|تالت|ثالث)\s+(?:فيديو|واحد|نتيج[هة]|اختيار|زر|زرار)\s*(?:قدامك|على\s+الشاش[هة]|من\s+ناحي[هة]|على\s+(?:اليمين|الشمال|اليسار)|فوق|تحت)?|(?:ال)?(?:تاني|ثاني|تالت|ثالث)\s+(?:من\s+)?(?:اليمين|الشمال|اليسار|فوق|تحت|قدامك)|(?:اضغط|دوس|كليك|انقر)\s+على|(?:انت\s+)?شايف\s+ايه|بص\s+على\s+الشاش[هة]|اقر[اأ]\s+الشاش[هة]|ايه\s+(?:اللي\s+)?(?:على\s+الشاش[هة]|قدامك|قدامي|مفتوح\s+قدامي)|what\s+(?:do\s+you\s+see|is\s+on\s+(?:the\s+)?screen)|click\s+on\s+(?:the\s+)?(?:first|second|right|left))/i;
+
+  return spatialVisualRegex.test(normalized);
+}
+
+/**
  * Detects whether the transcript contains any ZAZA wake-word variant.
  */
 export function hasWakeWord(text) {

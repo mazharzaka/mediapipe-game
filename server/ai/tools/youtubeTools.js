@@ -185,13 +185,13 @@ export async function launchUrlInChromeForeground(targetUrl, extraChromeArgs = [
  */
 export const playYoutubeVideo = tool({
   description:
-    'فتح موقع يوتيوب (الصفحة الرئيسية) أو البحث عن أي فيديو أو أغنية أو ملخص ماتش أو فيلم أو قرآن على يوتيوب وتشغيله مباشرة في مقدمة ويندوز.',
+    'فتح موقع يوتيوب (الصفحة الرئيسية) أو البحث عن فيديو/ماتش/أغنية محددة بالاسم على يوتيوب وتشغيلها في مقدمة ويندوز. أمثلة عربية/إنجليزية: "افتح لي اليوتيوب" (query: ""), "هات لي ماتش برشلونة" (query: "ماتش برشلونة"), "play Barcelona match". تحذير: لا تستخدم هذه الأداة لأي أمر يحتوي على إشارة مكانية على الشاشة مثل "أول فيديو على اليمين" أو "التاني على الشمال".',
   inputSchema: z.object({
     query: z
       .string()
       .optional()
       .default('')
-      .describe('نص أو جملة البحث عن الفيديو على يوتيوب (مثال: ملخص ماتش الأهلي والزمالك، سورة الكهف، عمرو دياب)، أو اتركه فارغاً / "youtube" لفتح الصفحة الرئيسية ليوتيوب'),
+      .describe('اسم الفيديو أو الماتش أو الأغنية للبحث (مثل: "ماتش برشلونة"، "سورة الكهف")، أو اتركه فارغاً "" لفتح الصفحة الرئيسية ليوتيوب مباشرة'),
   }),
   execute: async ({ query = '' }) => {
     const cleanQuery = String(query || '')
@@ -199,9 +199,11 @@ export const playYoutubeVideo = tool({
       .replace(/\s+/g, ' ')
       .trim();
 
+    console.log(`[Tool:playYoutubeVideo] Executing with query: "${cleanQuery}"`);
+
     const isHomepageRequest =
       !cleanQuery ||
-      /^(?:(?:افتح|شغل)(?:\s+(?:لي|لنا))?\s+)?(?:ال)?(?:يوتيوب|youtube(?:\.com)?)(?:\s+(?:الرئيسي[ةه]|العادي|فقط|بس))?$/i.test(
+      /^(?:(?:افتح|شغل|هات)(?:\s+(?:لي|لنا))?\s+)?(?:ال)?(?:يوتيوب|يوتوب|youtube(?:\.com)?)(?:\s+(?:الرئيسي[ةه]|العادي|فقط|بس))?$/i.test(
         cleanQuery,
       ) ||
       /^(?:home|homepage|الرئيسي[ةه])$/i.test(cleanQuery);
@@ -209,17 +211,23 @@ export const playYoutubeVideo = tool({
     if (isHomepageRequest) {
       const homeUrl = 'https://www.youtube.com/';
       const launchResult = await launchUrlInChromeForeground(homeUrl, [], 'YouTube|Chrome');
+      console.log(`[Tool:playYoutubeVideo] Homepage launch result: success=${launchResult.success}, method=${launchResult.method}`);
       if (!launchResult.success) {
         return {
           success: false,
+          action: 'open_youtube_home',
+          details: { query: cleanQuery || 'YouTube', url: homeUrl },
+          error: launchResult.error,
           query: cleanQuery || 'YouTube',
           url: homeUrl,
-          error: launchResult.error,
           message: `فشل فتح يوتيوب في المتصفح: ${launchResult.error}`,
         };
       }
       return {
         success: true,
+        action: 'open_youtube_home',
+        details: { url: homeUrl, method: launchResult.method, foreground: Boolean(launchResult.foreground) },
+        error: null,
         query: cleanQuery || 'YouTube',
         videoId: null,
         url: homeUrl,
@@ -263,22 +271,28 @@ export const playYoutubeVideo = tool({
         }
       }
     } catch (fetchErr) {
-      console.warn('[youtubeTools:playYoutubeVideo] Fetch fallback to search URL:', fetchErr.message);
+      console.warn('[Tool:playYoutubeVideo] Fetch fallback to search URL:', fetchErr.message);
     }
 
     const launchResult = await launchUrlInChromeForeground(videoUrl, [], 'YouTube|Chrome');
+    console.log(`[Tool:playYoutubeVideo] Video launch result: success=${launchResult.success}, url=${videoUrl}, method=${launchResult.method}`);
     if (!launchResult.success) {
       return {
         success: false,
+        action: 'play_youtube_video',
+        details: { query: cleanQuery, url: videoUrl, videoId },
+        error: launchResult.error,
         query: cleanQuery,
         url: videoUrl,
-        error: launchResult.error,
         message: `فشل فتح يوتيوب في المتصفح: ${launchResult.error}`,
       };
     }
 
     return {
       success: true,
+      action: 'play_youtube_video',
+      details: { query: cleanQuery, videoId, url: videoUrl, directVideo, method: launchResult.method },
+      error: null,
       query: cleanQuery,
       videoId,
       url: videoUrl,
@@ -298,11 +312,11 @@ export const playYoutubeVideo = tool({
  */
 export const controlMediaPlayback = tool({
   description:
-    'التحكم الفوري في الصوت وتشغيل الوسائط على ويندوز (play_pause للتشغيل والإيقاف، mute لكتم الصوت، volume_up لرفع الصوت 7 نبضات ~14%، volume_down لخفض الصوت 7 نبضات ~14%، next للتالي).',
+    'التحكم الفوري في الصوت وتشغيل الوسائط على ويندوز. أمثلة: "علي الصوت" (volume_up)، "وطي الصوت" (volume_down)، "اعمل ميوت" (mute)، "وقف/شغل الفيديو" (play_pause)، "الفيديو التالي" (next). Examples: "volume up", "mute audio", "pause video".',
   inputSchema: z.object({
     action: z
       .enum(['play_pause', 'mute', 'volume_up', 'volume_down', 'next'])
-      .describe('إجراء التحكم في الميديا والصوت'),
+      .describe('إجراء التحكم في الميديا والصوت (play_pause | mute | volume_up | volume_down | next)'),
     repeat: z
       .number()
       .int()
@@ -322,7 +336,7 @@ export const controlMediaPlayback = tool({
 
     const charCode = keyMap[action];
     if (!charCode) {
-      return { success: false, error: `إجراء غير مدعوم: ${action}` };
+      return { success: false, action, details: {}, error: `إجراء غير مدعوم: ${action}` };
     }
 
     const isVolumeStep = action === 'volume_up' || action === 'volume_down';
@@ -330,12 +344,14 @@ export const controlMediaPlayback = tool({
     const count = Math.max(1, Math.min(repeat && repeat > 1 ? repeat : defaultPulses, 20));
     const psCmd = `powershell -NoProfile -Command "$w = New-Object -ComObject WScript.Shell; for($i=0; $i -lt ${count}; $i++) { $w.SendKeys([char]${charCode}); Start-Sleep -Milliseconds 35 }"`;
 
+    console.log(`[Tool:controlMediaPlayback] Executing action=${action}, pulses=${count}`);
     return new Promise((resolve) => {
       exec(psCmd, { shell: 'cmd.exe', timeout: 5000 }, (err) => {
         if (err) {
           resolve({
             success: false,
             action,
+            details: { pulses: count },
             error: err.message,
             message: `فشل تنفيذ أمر الميديا (${action}): ${err.message}`,
           });
@@ -343,6 +359,8 @@ export const controlMediaPlayback = tool({
           resolve({
             success: true,
             action,
+            details: { pulses: count },
+            error: null,
             pulses: count,
             repeat: count,
             message: `✓ تم تنفيذ أمر الميديا (${action}) بنجاح (${count} نبضات).`,

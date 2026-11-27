@@ -3,6 +3,7 @@ import path from 'path';
 import os from 'os';
 import { z } from 'zod';
 import { generateObjectWithFallback } from './llmClient.js';
+import { isSpatialOrVisualScreenIntent } from './fastPath.js';
 
 // In-Memory Cache for Desktop files (30 seconds TTL)
 let cachedDesktopFiles = null;
@@ -252,8 +253,20 @@ export function normalizeEgyptianTranscript(input) {
 function applyDeterministicOverrides(normalizedText, routeObj) {
   const out = { ...routeObj };
 
-  // Opening YouTube homepage or searching YouTube always belongs to youtube domain
-  if (/(?:افتح|شغل)(?:\s+(?:لي|لنا))?\s+(?:ال)?يوتيوب|\bopen\s+youtube\b/i.test(normalizedText)) {
+  // 0. HIGHEST PRIORITY: Spatial / Visual screen references ALWAYS route to Vision (NEVER YouTube search!)
+  if (isSpatialOrVisualScreenIntent(normalizedText)) {
+    out.domain = 'vision';
+    out.complexity = 'simple';
+    out.requiresConfirmation = false;
+    return out;
+  }
+
+  // Opening YouTube homepage or searching/playing YouTube content by name always belongs to youtube domain
+  if (
+    /(?:افتح|شغل|هات)(?:\s+(?:لي|لنا))?\s+(?:(?:ال)?(?:يوتيوب|يوتوب)|ماتش|ملخص|فيديو|اغني|أغني|قران|قرآن)|\b(?:open|play)\s+youtube\b/i.test(
+      normalizedText
+    )
+  ) {
     out.domain = 'youtube';
   }
 
@@ -409,7 +422,7 @@ export function filterToolsByDomain(allTools, domain, complexity) {
     youtube: ['playYoutubeVideo', 'controlMediaPlayback'],
     browser: ['openBrowserUrl', 'browserTabAction'],
     file_office: ['updateExcelCell', 'fileOperation'],
-    vision: ['captureAndAnalyzeScreen', 'controlMagnifier'],
+    vision: ['captureAndAnalyzeScreen', 'controlMagnifier', 'browserTabAction'],
     system_cli: ['openApplication', 'runTerminalCommand', 'listOrKillProcess'],
     power: ['controlPower', 'controlMediaPlayback'],
   };

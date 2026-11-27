@@ -7,11 +7,11 @@ import { exec } from 'child_process';
  */
 export const controlPower = tool({
   description:
-    'التحكم في أوامر الطاقة للنظام (Lock, Sleep, Shutdown, Restart, Cancel Shutdown). الأوامر الحساسة مثل Shutdown و Restart تتطلب تأكيداً صريحاً (confirmed: true) قبل التنفيذ لحماية عمل المستخدم.',
+    'التحكم في أوامر الطاقة للنظام (lock لقفل الشاشة، sleep لوضع السكون، shutdown لإيقاف التشغيل، restart لإعادة التشغيل، cancel_shutdown لإلغاء الإغلاق). أمثلة: "اقفل الشاشة" (lock), "اعمل ريستارت" (restart, confirmed: false). الأوامر الحساسة (shutdown/restart) تتطلب confirmed: true.',
   inputSchema: z.object({
     action: z
       .enum(['lock', 'sleep', 'shutdown', 'restart', 'cancel_shutdown'])
-      .describe('نوع إجراء الطاقة المطلوب تنفيذه'),
+      .describe('نوع إجراء الطاقة المطلوب (lock | sleep | shutdown | restart | cancel_shutdown)'),
     confirmed: z
       .boolean()
       .optional()
@@ -23,6 +23,7 @@ export const controlPower = tool({
       .describe('سبب أو توضيح إضافي لأمر الطاقة'),
   }),
   execute: async ({ action, confirmed, reason }) => {
+    console.log(`[Tool:controlPower] Executing action=${action}, confirmed=${Boolean(confirmed)}`);
     // 1. Lock screen: Instant and fully safe
     if (action === 'lock') {
       return new Promise((resolve) => {

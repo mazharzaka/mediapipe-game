@@ -507,10 +507,10 @@ export async function runAgent({
     effectiveTools && Object.keys(effectiveTools).length > 0 && domain !== "chat"
   );
 
-  const primaryModel = model || "gemini-3.1-flash-lite";
-  const timeoutMs = primaryModel === "gemma-4-31b-it" ? 12000 : 8500;
+  const primaryModel = domain === "vision" ? "gemini-3.1-flash-lite" : (model || "gemini-3.1-flash-lite");
+  const timeoutMs = domain === "vision" ? 25000 : (primaryModel === "gemma-4-31b-it" ? 12000 : 8500);
   const messages = formatMessages(history, prompt);
-  const effectiveMaxSteps = hasTools ? Math.max(1, maxSteps) : 1;
+  const effectiveMaxSteps = domain === "vision" ? 1 : (hasTools ? Math.max(1, maxSteps) : 1);
   const prepareStep = buildPrepareStep(domain, effectiveTools);
 
   const { result, meta } = await generateTextWithFallback({
@@ -521,6 +521,7 @@ export async function runAgent({
     ...(prepareStep ? { prepareStep } : {}),
     primaryModel,
     timeoutMs,
+    multimodalOnly: domain === "vision",
   });
 
   let toolCalls = (
@@ -588,6 +589,36 @@ export async function runAgent({
     finalText = execOut?.message || finalText || "✓ تم فتح يوتيوب في المقدمة يا باشا!";
   }
 
+  // Safety Net 3 (Anti-Hallucination Guard for Vision domain):
+  // Never allow a text-only reply in the vision domain without actually capturing & analyzing the screen!
+  if (domain === "vision" && toolCalls.length === 0 && effectiveTools?.captureAndAnalyzeScreen?.execute) {
+    const args = { question: String(prompt || "صف ما يظهر على الشاشة الحالية بإيجاز واضح.") };
+    console.warn(
+      `[Agent Vision Guard] Model answered without calling captureAndAnalyzeScreen. Enforcing live screenshot capture...`
+    );
+    const execOut = await effectiveTools.captureAndAnalyzeScreen.execute(args);
+    const callId = `vision_guard_${Date.now()}`;
+    toolCalls.push({
+      type: "tool-call",
+      toolCallId: callId,
+      toolName: "captureAndAnalyzeScreen",
+      args,
+      input: args,
+      enforcedByGuard: true,
+    });
+    toolResults.push({
+      type: "tool-result",
+      toolCallId: callId,
+      toolName: "captureAndAnalyzeScreen",
+      args,
+      input: args,
+      result: execOut,
+      output: execOut,
+      enforcedByGuard: true,
+    });
+    finalText = execOut?.analysis || execOut?.message || finalText || "تم التقاط الشاشة وتحليلها.";
+  }
+
   // When maxSteps === 1 finishes immediately after executing the required tool on Step 0, surface the tool's Arabic message cleanly
   if (!finalText && toolResults.length > 0) {
     const summaries = toolResults
@@ -606,6 +637,7 @@ export async function runAgent({
     steps: result.steps || [],
     toolCalls,
     toolResults,
+    usage: result.usage || null,
     meta,
   };
 }

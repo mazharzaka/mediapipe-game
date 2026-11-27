@@ -295,11 +295,24 @@ export async function executeWithFallback(operationFn, options = {}) {
   };
 
   const primaryProvider = getProviderForModel(primaryModel);
+  const groqKey = getGroqApiKey(options.groqApiKeyOverride);
+  const googleFallbacks = ['gemini-flash-lite-latest', 'gemini-3-flash-preview', 'gemma-4-31b-it']
+    .filter((m) => m !== primaryModel)
+    .map((m) => ({
+      modelName: m,
+      provider: 'google',
+      timeoutMs: Math.max(primaryTimeout, 15000),
+    }));
 
   const candidates = [
     { modelName: primaryModel, provider: primaryProvider, timeoutMs: primaryTimeout },
-    ...(primaryModel !== fallbackModel ? [{ modelName: fallbackModel, provider: 'groq', timeoutMs: 15000 }] : []),
-    ...(openRouterKey ? [{ modelName: 'openrouter/free', provider: 'openrouter', timeoutMs: 15000 }] : []),
+    ...googleFallbacks,
+    ...(groqKey && !options.multimodalOnly && primaryModel !== fallbackModel
+      ? [{ modelName: fallbackModel, provider: 'groq', timeoutMs: 15000 }]
+      : []),
+    ...(openRouterKey && !options.multimodalOnly
+      ? [{ modelName: 'openrouter/free', provider: 'openrouter', timeoutMs: 15000 }]
+      : []),
   ];
 
   let fallbackTriggered = false;

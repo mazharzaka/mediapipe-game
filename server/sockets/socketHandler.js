@@ -311,6 +311,13 @@ export function setupSocketHandler(io) {
           text: replyText,
           model: "local-fast-path",
           executedTools: [executedToolEntry],
+          debugTrace: {
+            heardText: payload?.rawHeardText || prompt,
+            cleanText: prompt.trim(),
+            domain: fastPathMatch.type === "scroll" ? "browser" : "youtube",
+            model: "local-fast-path",
+            tokens: 0,
+          },
         });
         return;
       }
@@ -413,10 +420,15 @@ export function setupSocketHandler(io) {
         return;
       }
 
-      const candidateModels = [
+      const rawCandidates = [
         targetModel,
         ...FALLBACK_MODELS.filter((m) => m !== targetModel),
       ];
+      // Vision domain MUST ONLY use multimodal models (never text-only Groq/OSS models)
+      const candidateModels =
+        effectiveDomain === "vision"
+          ? ["gemini-3.1-flash-lite", "gemma-4-31b-it", "gemini-3-flash-preview"]
+          : rawCandidates;
 
       let streamSucceeded = false;
       let lastHandledError = null;
@@ -576,11 +588,50 @@ export function setupSocketHandler(io) {
               });
             }
 
+            // Anti-Hallucination Guard for Vision domain: never allow text-only reply without live screenshot analysis
+            if (
+              effectiveDomain === "vision" &&
+              executedTools.length === 0 &&
+              filteredTools?.captureAndAnalyzeScreen?.execute
+            ) {
+              const visionArgs = {
+                question: String(effectiveText || prompt || "صف ما يظهر على الشاشة الحالية بإيجاز واضح."),
+              };
+              console.warn(
+                `[Socket Vision Guard] Enforcing captureAndAnalyzeScreen to prevent text-only reply.`
+              );
+              const visionOut = await filteredTools.captureAndAnalyzeScreen.execute(visionArgs);
+              const visionInfo = { name: "captureAndAnalyzeScreen", args: visionArgs, result: visionOut };
+              executedTools.push(visionInfo);
+              fullText = visionOut?.analysis || visionOut?.message || fullText || "تم التقاط الشاشة وتحليلها.";
+              socket.emit("ai_stream_chunk", {
+                chunk: "",
+                fullText,
+                toolCompleted: visionInfo,
+              });
+            }
+
+            let totalTokens = null;
+            try {
+              const usage = await result.usage;
+              if (usage && typeof usage.totalTokens === "number") {
+                totalTokens = usage.totalTokens;
+              }
+            } catch (_) {}
+
             streamSucceeded = true;
             socket.emit("ai_stream_done", {
               text: fullText || "",
+              model: currentModel,
               executedTools,
               pendingAction,
+              debugTrace: {
+                heardText: payload?.rawHeardText || prompt,
+                cleanText: effectiveText,
+                domain: effectiveDomain,
+                model: currentModel,
+                tokens: totalTokens ?? "auto",
+              },
             });
             break;
           }

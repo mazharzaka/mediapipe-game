@@ -35,6 +35,31 @@ function extractAfterWakeWord(rawPiece) {
   return trimmed;
 }
 
+/**
+ * ASR Normalizer for Egyptian Arabic Web Speech API transcripts:
+ * Fixes hamzas, split words ("افتح ال يوتيوب" -> "افتح اليوتيوب"), misheard platforms ("اليوتوب" -> "اليوتيوب"),
+ * tech terms ("فلاش لايت" -> "flash-lite"), and fused colloquial verbs ("هاتلي" -> "هات لي").
+ */
+function normalizeArabicSpeech(text) {
+  if (!text || typeof text !== "string") return "";
+  return text
+    .trim()
+    .replace(/[\u064B-\u065F\u0640]/g, "")
+    .replace(/[أإآ]/g, "ا")
+    .replace(/(?:^|\s)ال\s+(يوتيوب|يوتوب|شاش[ةه]|صوت|فيديو|تاب|يمين|شمال|يسار)/gi, " ال$1")
+    .replace(/\b(?:ال)?يوتوب\b/gi, "اليوتيوب")
+    .replace(/\bيوتيوب\b/gi, "اليوتيوب")
+    .replace(/\bفلاش\s*لايت\b/gi, "flash-lite")
+    .replace(/\bفي\s+اس\s+كود\b/gi, "VS Code")
+    .replace(/\bهاتلي\b/gi, "هات لي")
+    .replace(/\bافتحلي\b/gi, "افتح لي")
+    .replace(/\bشغلي\b/gi, "شغل لي")
+    .replace(/\bعلي\s+شويه\b/gi, "علي شوية")
+    .replace(/\bوطي\s+شويه\b/gi, "وطي شوية")
+    .replace(/\s+/g, " ")
+    .trim();
+}
+
 // 10-minute Anti-Prank Auto-Disarm timeout (600,000 ms)
 const ZAKA_AUTO_DISARM_MS = 10 * 60 * 1000;
 // 6-second awake window after saying "ظاظا" alone before returning to standby
@@ -283,6 +308,13 @@ export default function AiAgentTab() {
       const finalTools = data?.executedTools || currentTools;
 
       if (finalText || finalTools.length > 0) {
+        const trace = data?.debugTrace || {
+          heardText: currentRouteInfo?.rawText || "",
+          cleanText: currentRouteInfo?.cleanText || "",
+          domain: currentRouteInfo?.domain || "chat",
+          model: data?.model || currentRouteInfo?.targetModel || "gemini-3.1-flash-lite",
+          tokens: currentRouteInfo?.targetModel === "local-fast-path" ? 0 : "auto",
+        };
         setMessages((prev) => [
           ...prev,
           {
@@ -290,6 +322,7 @@ export default function AiAgentTab() {
             content: finalText,
             tools: finalTools,
             routeInfo: currentRouteInfo,
+            debugTrace: trace,
           },
         ]);
       }
@@ -1238,7 +1271,7 @@ export default function AiAgentTab() {
       return;
     }
 
-    const prompt = strippedPrompt || rawPrompt;
+    const prompt = normalizeArabicSpeech(strippedPrompt || rawPrompt);
     if (!prompt || isStreaming) return;
 
     if (!socket.connected) {
@@ -1267,6 +1300,7 @@ export default function AiAgentTab() {
     socket.emit("ai_command", {
       text: prompt,
       prompt,
+      rawHeardText: rawPrompt,
       history: historyPayload,
     });
   };
@@ -1675,6 +1709,19 @@ export default function AiAgentTab() {
                     ⚙️ نفذت {t.name}
                   </span>
                 ))}
+              </div>
+            )}
+
+            {/* Compact Debug Trace Badge: [Heard Text ◄ Domain ◄ Model ◄ Tokens] */}
+            {msg.role === "assistant" && msg.debugTrace && (
+              <div
+                className="mt-1 pt-1.5 border-t border-zinc-800 text-[11px] font-mono text-zinc-300 flex flex-wrap items-center gap-1"
+                aria-label="تشخيص المسار والأداة"
+              >
+                <span className="px-1.5 py-0.5 rounded bg-zinc-950 border border-zinc-700 text-zinc-200 max-w-full truncate">
+                  [🎙️ {msg.debugTrace.heardText || "—"} ◄ 📦 {msg.debugTrace.domain || "chat"} ◄ 🤖{" "}
+                  {msg.debugTrace.model || "—"} ◄ 🪙 {msg.debugTrace.tokens ?? 0} توكن]
+                </span>
               </div>
             )}
           </div>
