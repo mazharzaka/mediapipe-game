@@ -45,7 +45,7 @@ function AppLayout() {
         </Link>
 
         <nav className="flex items-center gap-3" aria-label="أقسام التطبيق الرئيسية">
-          {/* 1. AI Assistant (ZAKA) */}
+          {/* 1. AI Assistant (ZAZA - ظاظا) */}
           <Link
             to="/assistive"
             className={`min-h-12 px-4 py-2 rounded-xl font-bold text-base flex items-center gap-2 border-2 transition-colors duration-150 focus-visible:outline-none focus-visible:ring-4 focus-visible:ring-amber-400 ${
@@ -55,7 +55,7 @@ function AppLayout() {
             }`}
           >
             <span aria-hidden="true">🤖</span>
-            <span>المساعد الذكي (زاقا)</span>
+            <span>المساعد الذكي (ZAZA — ظاظا)</span>
           </Link>
 
           {/* 2. Prominent Joyful LOLY Button with Circular Cartoon Avatar & Glowing Golden Frame */}
@@ -111,7 +111,7 @@ function AppLayout() {
           isAssistiveRoute ? 'relative' : 'fixed bottom-0 inset-x-0'
         }`}
       >
-        {/* 1. AI Assistant (ZAKA) */}
+        {/* 1. AI Assistant (ZAZA - ظاظا) */}
         <Link
           to="/assistive"
           className={`min-h-12 rounded-xl px-2 py-1 font-bold text-xs flex flex-col items-center justify-center gap-0.5 border transition-colors duration-150 ${
@@ -123,7 +123,7 @@ function AppLayout() {
           <span className="text-base" aria-hidden="true">
             🤖
           </span>
-          <span className="truncate">المساعد (زاقا)</span>
+          <span className="truncate">ZAZA — ظاظا</span>
         </Link>
 
         {/* 2. Prominent Joyful LOLY Button with Circular Avatar & Glowing Golden Ring */}

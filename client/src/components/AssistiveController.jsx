@@ -409,7 +409,7 @@ export default function AssistiveController() {
   };
 
   const tabsList = [
-    { id: 'ai', label: '🤖 المساعد الذكي (AI Agent)', shortLabel: '🤖 زاقا' },
+    { id: 'ai', label: '🤖 المساعد الذكي (ZAZA — ظاظا)', shortLabel: '🤖 ظاظا' },
     { id: 'touchpad', label: '🖱️ التاتش باد (Touchpad)', shortLabel: '🖱️ ماوس' },
     { id: 'remote', label: '📱 الريموت (Remote)', shortLabel: '📱 ريموت' },
     { id: 'face', label: '👤 تتبع الوجه (Face)', shortLabel: '👤 وجه' },

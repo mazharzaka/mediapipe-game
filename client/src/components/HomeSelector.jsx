@@ -316,7 +316,7 @@ export default function HomeSelector() {
                 🤖
               </span>
               <span className="text-xl sm:text-2xl font-bold">
-                المساعد الذكي (زاقا)
+                المساعد الذكي (ZAZA — ظاظا)
               </span>
               <span className="text-sm sm:text-base text-teal-100 font-medium">
                 المساعد الصوتي، تتبع الوجه، التاتش باد، والريموت

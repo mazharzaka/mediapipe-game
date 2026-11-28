@@ -1,19 +1,72 @@
 import { useState, useEffect, useRef, useCallback } from "react";
 import { socket } from "../socket";
 
-// Wake Word Regex matching all Egyptian Arabic & English phonetic variations of "زاقا" (ZAKA)
-const ZAKA_WAKE_REGEX =
-  /(?:يا\s*)?(?:زاقا|زاكا|زكا|زقه|ذكا|زكاء|ذاكره|ذاكرة|zaka|zaqa)/i;
-const ZAKA_PREFIX_STRIP_REGEX =
-  /^.*?(?:يا\s*)?(?:زاقا|زاكا|زكا|زقه|ذكا|زكاء|ذاكره|ذاكرة|zaka|zaqa)[\s،,.!:؟?-]*/i;
+// Wake Word Variations & Regexes matching all Egyptian Arabic & English phonetic forms of "ZAZA — ظاظا"
+const WAKE_WORD_VARIANTS = [
+  "ظاظا", "ظاظه", "ظاظة", "زازا", "زازه", "زازة",
+  "زوزو", "زوزه", "زوزة", "ذاذا", "سازه", "زاقا",
+  "زاكا", "زكا", "زكى", "زكي", "زادكا",
+  "ZAZA", "zaza", "Zozo", "zozo", "Zaka", "zaka", "Zaqa",
+];
+
+const WAKE_WORD_DETECT_REGEX =
+  /(?:^|\s)(?:(?:إيه|ايه|ألو|الو|يا|ازيك|إزيك|هاي|هالو|hey|hi|ok|okay|yo)\s+)*(?:ظاظا|ظاظه|ظاظة|زازا|زازه|زازة|زوزو|زوزه|زوزة|ذاذا|سازه|زاقا|زاكا|زكا|زكى|زكي|زادكا|zaza|zozo|zaka|zaqa)(?=$|\s|[،,!\.\?])/i;
+const WAKE_WORD_STRIP_REGEX =
+  /^(?:(?:إيه|ايه|ألو|الو|يا|ازيك|إزيك|هاي|هالو|hey|hi|ok|okay|yo)\s+)*(?:ظاظا|ظاظه|ظاظة|زازا|زازه|زازة|زوزو|زوزه|زوزة|ذاذا|سازه|زاقا|زاكا|زكا|زكى|زكي|زادكا|zaza|zozo|zaka|zaqa)[،,!\.\?\s]*/i;
+
+const ZAZA_GREETINGS = [
+  "إيه يا برنس، إيه الأخبار؟",
+  "إيه يا كبير، عامل إيه، إيه أخبارك؟",
+  "أؤمر يا صاحبي، ظاظا معاك!",
+  "عيوني ليك يا هندسة، قول عايز إيه؟",
+];
+
+function extractAfterWakeWord(rawPiece) {
+  const trimmed = String(rawPiece || "").trim();
+  if (!trimmed) return "";
+  if (WAKE_WORD_STRIP_REGEX.test(trimmed)) {
+    return trimmed.replace(WAKE_WORD_STRIP_REGEX, "").trim();
+  }
+  const match = trimmed.match(WAKE_WORD_DETECT_REGEX);
+  if (match && typeof match.index === "number") {
+    const fromWake = trimmed.slice(match.index).trim();
+    return fromWake.replace(WAKE_WORD_STRIP_REGEX, "").trim();
+  }
+  return trimmed;
+}
+
+/**
+ * ASR Normalizer for Egyptian Arabic Web Speech API transcripts:
+ * Fixes hamzas, split words ("افتح ال يوتيوب" -> "افتح اليوتيوب"), misheard platforms ("اليوتوب" -> "اليوتيوب"),
+ * tech terms ("فلاش لايت" -> "flash-lite"), and fused colloquial verbs ("هاتلي" -> "هات لي").
+ */
+function normalizeArabicSpeech(text) {
+  if (!text || typeof text !== "string") return "";
+  return text
+    .trim()
+    .replace(/[\u064B-\u065F\u0640]/g, "")
+    .replace(/[أإآ]/g, "ا")
+    .replace(/(?:^|\s)ال\s+(يوتيوب|يوتوب|شاش[ةه]|صوت|فيديو|تاب|يمين|شمال|يسار)/gi, " ال$1")
+    .replace(/\b(?:ال)?يوتوب\b/gi, "اليوتيوب")
+    .replace(/\bيوتيوب\b/gi, "اليوتيوب")
+    .replace(/\bفلاش\s*لايت\b/gi, "flash-lite")
+    .replace(/\bفي\s+اس\s+كود\b/gi, "VS Code")
+    .replace(/\bهاتلي\b/gi, "هات لي")
+    .replace(/\bافتحلي\b/gi, "افتح لي")
+    .replace(/\bشغلي\b/gi, "شغل لي")
+    .replace(/\bعلي\s+شويه\b/gi, "علي شوية")
+    .replace(/\bوطي\s+شويه\b/gi, "وطي شوية")
+    .replace(/\s+/g, " ")
+    .trim();
+}
 
 // 10-minute Anti-Prank Auto-Disarm timeout (600,000 ms)
 const ZAKA_AUTO_DISARM_MS = 10 * 60 * 1000;
-// 6-second awake window after saying "يا زكا" alone before returning to standby
+// 6-second awake window after saying "ظاظا" alone before returning to standby
 const ZAKA_AWAKE_WINDOW_MS = 6000;
 // 2.2-second Breath-Safe Silence Debounce while speaking a command
 const SILENCE_DEBOUNCE_MS = 2200;
-// 250ms safe cooldown after abort() before starting a fresh SpeechRecognition session
+// 250ms safe cooldown after abort()/TTS end before starting a fresh SpeechRecognition session
 const RECOGNITION_RESTART_DELAY_MS = 250;
 
 export default function AiAgentTab() {
@@ -22,7 +75,7 @@ export default function AiAgentTab() {
     {
       role: "assistant",
       content:
-        'أهلاً بيك يا باشا! أنا مساعدك الذكي "زاقا" (ZAKA). اضغط المايك في وضع العمل الصامت، أو فعّل "🌙 وضع السهرة (زاقا)" وقول: "يا زاقا وطي الصوت" أو "يا زاقا شغل ملخص ماتش".',
+        'أهلاً بيك يا باشا! أنا مساعدك الذكي "ZAZA — ظاظا". اضغط المايك في وضع العمل الصامت، أو فعّل "🌙 وضع السهرة (ZAZA - ظاظا)" وقول: "يا ظاظا علي شوية" أو "يا ظاظا افتح لي اليوتيوب".',
       tools: [],
     },
   ]);
@@ -56,6 +109,11 @@ export default function AiAgentTab() {
   const sendMessageRef = useRef(null);
   const wakeLockRef = useRef(null);
   const audioCtxRef = useRef(null);
+  const isSpeakingRef = useRef(false);
+  const ttsResumeTimerRef = useRef(null);
+  const wakeGreetingTimerRef = useRef(null);
+  const micConstraintStreamRef = useRef(null);
+  const speakReplyRef = useRef(null);
 
   const [socketStatus, setSocketStatus] = useState(socket.connected);
   const [showMagnifier, setShowMagnifier] = useState(false);
@@ -163,7 +221,7 @@ export default function AiAgentTab() {
     } catch (_) {}
 
     setSpeechError(
-      "🛡️ تم إيقاف الاستماع التلقائي لـ (زاقا) بعد 10 دقائق من عدم النشاط لحماية خصوصيتك.",
+      "🛡️ تم إيقاف الاستماع التلقائي لـ (ZAZA — ظاظا) بعد 10 دقائق من عدم النشاط لحماية خصوصيتك.",
     );
   }, [
     clearSilenceTimer,
@@ -250,6 +308,13 @@ export default function AiAgentTab() {
       const finalTools = data?.executedTools || currentTools;
 
       if (finalText || finalTools.length > 0) {
+        const trace = data?.debugTrace || {
+          heardText: currentRouteInfo?.rawText || "",
+          cleanText: currentRouteInfo?.cleanText || "",
+          domain: currentRouteInfo?.domain || "chat",
+          model: data?.model || currentRouteInfo?.targetModel || "gemini-3.1-flash-lite",
+          tokens: currentRouteInfo?.targetModel === "local-fast-path" ? 0 : "auto",
+        };
         setMessages((prev) => [
           ...prev,
           {
@@ -257,8 +322,13 @@ export default function AiAgentTab() {
             content: finalText,
             tools: finalTools,
             routeInfo: currentRouteInfo,
+            debugTrace: trace,
           },
         ]);
+      }
+
+      if (finalText && isZakaModeRef.current && !data?.error && !data?.requiresConfirmation) {
+        speakReplyRef.current?.(finalText, { resumePhase: "standby" });
       }
 
       if (data?.pendingAction) {
@@ -386,6 +456,162 @@ export default function AiAgentTab() {
     }
   }, []);
 
+  const clearTtsResumeTimer = useCallback(() => {
+    if (ttsResumeTimerRef.current) {
+      clearTimeout(ttsResumeTimerRef.current);
+      ttsResumeTimerRef.current = null;
+    }
+  }, []);
+
+  const clearWakeGreetingTimer = useCallback(() => {
+    if (wakeGreetingTimerRef.current) {
+      clearTimeout(wakeGreetingTimerRef.current);
+      wakeGreetingTimerRef.current = null;
+    }
+  }, []);
+
+  // Enable WebRTC echoCancellation + noiseSuppression for hands-free wireless headset / distant mic
+  const enableHandsFreeAudioConstraints = useCallback(async () => {
+    if (!navigator?.mediaDevices?.getUserMedia) return;
+    try {
+      if (micConstraintStreamRef.current) {
+        return;
+      }
+      const stream = await navigator.mediaDevices.getUserMedia({
+        audio: {
+          echoCancellation: true,
+          noiseSuppression: true,
+          autoGainControl: true,
+        },
+      });
+      micConstraintStreamRef.current = stream;
+    } catch (_) {
+      // Non-fatal: SpeechRecognition can still operate with browser defaults
+    }
+  }, []);
+
+  const releaseHandsFreeAudioConstraints = useCallback(() => {
+    if (micConstraintStreamRef.current) {
+      try {
+        micConstraintStreamRef.current.getTracks().forEach((t) => t.stop());
+      } catch (_) {}
+      micConstraintStreamRef.current = null;
+    }
+  }, []);
+
+  // Egyptian Male TTS (Shakir / Hamed / ar-EG male, pitch 0.92, rate 1.05) + Headset Anti-Echo
+  const speakReply = useCallback(
+    (rawText, options = {}) => {
+      if (typeof window === "undefined" || !("speechSynthesis" in window)) return;
+      const cleanSpeech = String(rawText || "")
+        .replace(/[\u{1F300}-\u{1FAFF}\u{2600}-\u{27BF}]/gu, " ")
+        .replace(/[✓✕⚠️⚡🛡️🎙️🔊🔉🔇⏯️⬇️⬆️🍿🌙🤖🎯]/g, " ")
+        .replace(/\(\+?-?\d+%?[^)]*\)/g, " ")
+        .replace(/\s+/g, " ")
+        .trim();
+
+      if (!cleanSpeech) return;
+
+      try {
+        clearTtsResumeTimer();
+        window.speechSynthesis.cancel();
+
+        const utterance = new SpeechSynthesisUtterance(cleanSpeech);
+        utterance.lang = "ar-EG";
+        utterance.pitch = 0.92;
+        utterance.rate = 1.05;
+
+        const voices = window.speechSynthesis.getVoices() || [];
+        const arVoices = voices.filter((v) => /^ar\b/i.test(v.lang || ""));
+        const selectedVoice =
+          voices.find((v) => /shakir/i.test(v.name)) ||
+          voices.find((v) => /hamed/i.test(v.name)) ||
+          arVoices.find(
+            (v) =>
+              /ar-EG/i.test(v.lang) &&
+              !/salma|hoda|zariyah|fatima|amira|laila|female/i.test(v.name),
+          ) ||
+          arVoices.find(
+            (v) => !/salma|hoda|zariyah|fatima|amira|laila|female/i.test(v.name),
+          ) ||
+          arVoices[0] ||
+          null;
+
+        if (selectedVoice) {
+          utterance.voice = selectedVoice;
+          utterance.lang = selectedVoice.lang || "ar-EG";
+        }
+
+        const resumeAfterSpeech = () => {
+          isSpeakingRef.current = false;
+          clearTtsResumeTimer();
+          ttsResumeTimerRef.current = setTimeout(() => {
+            ttsResumeTimerRef.current = null;
+            if (
+              isZakaModeRef.current &&
+              zakaPhaseRef.current !== "disarmed" &&
+              zakaPhaseRef.current !== "mic_error"
+            ) {
+              const targetPhase = options.resumePhase || zakaPhaseRef.current || "standby";
+              zakaPhaseRef.current = targetPhase;
+              setZakaPhase(targetPhase);
+              isUserStoppedRef.current = false;
+              isSilenceCompletedRef.current = false;
+              try {
+                recognitionRef.current?.start();
+              } catch (_) {}
+
+              if (targetPhase === "capturing") {
+                clearZakaAwakeTimer();
+                zakaAwakeTimerRef.current = setTimeout(() => {
+                  if (
+                    isZakaModeRef.current &&
+                    zakaPhaseRef.current === "capturing" &&
+                    !finalTranscriptRef.current &&
+                    !latestInterimRef.current
+                  ) {
+                    zakaPhaseRef.current = "standby";
+                    setZakaPhase("standby");
+                  }
+                }, ZAKA_AWAKE_WINDOW_MS);
+              }
+            }
+          }, RECOGNITION_RESTART_DELAY_MS);
+        };
+
+        utterance.onstart = () => {
+          isSpeakingRef.current = true;
+          clearModeSwitchTimer();
+          // Pause SpeechRecognition temporarily while ZAZA speaks (Headset Anti-Echo)
+          isUserStoppedRef.current = true;
+          isListeningRef.current = false;
+          setIsListening(false);
+          try {
+            recognitionRef.current?.abort();
+          } catch (_) {}
+        };
+
+        utterance.onend = resumeAfterSpeech;
+        utterance.onerror = resumeAfterSpeech;
+
+        // Pre-emptively pause recognition before speaking to guarantee zero echo capture
+        isSpeakingRef.current = true;
+        isUserStoppedRef.current = true;
+        try {
+          recognitionRef.current?.abort();
+        } catch (_) {}
+
+        window.speechSynthesis.speak(utterance);
+      } catch (err) {
+        console.warn("[ZAZA TTS Error]:", err);
+        isSpeakingRef.current = false;
+      }
+    },
+    [clearModeSwitchTimer, clearTtsResumeTimer, clearZakaAwakeTimer],
+  );
+
+  speakReplyRef.current = speakReply;
+
   // Detect insecure HTTP origin on mobile LAN (where Chrome blocks Web Speech / Microphone)
   const getInsecureOriginWarning = useCallback(() => {
     if (typeof window === "undefined") return "";
@@ -508,8 +734,8 @@ export default function AiAgentTab() {
             rawMonitorSnippet += rawPiece + " ";
 
             if (zakaPhaseRef.current === "standby") {
-              if (ZAKA_WAKE_REGEX.test(rawPiece)) {
-                // Wake word detected! Activate command capture (supports single-sentence OR 6s 2-stage)
+              if (WAKE_WORD_DETECT_REGEX.test(rawPiece)) {
+                // Wake word detected! Supports One-Breath Command OR Wake-Only Egyptian Male Greeting
                 wakeTriggeredNow = true;
                 zakaPhaseRef.current = "capturing";
                 setZakaPhase("capturing");
@@ -518,10 +744,9 @@ export default function AiAgentTab() {
                 playZakaChime();
                 resetZakaAutoDisarmTimer();
 
-                const afterWake = rawPiece
-                  .replace(ZAKA_PREFIX_STRIP_REGEX, "")
-                  .trim();
+                const afterWake = extractAfterWakeWord(rawPiece);
                 if (afterWake) {
+                  clearWakeGreetingTimer();
                   if (isFinal) {
                     newlyFinalized += afterWake + " ";
                   } else {
@@ -530,10 +755,14 @@ export default function AiAgentTab() {
                 }
               }
             } else if (zakaPhaseRef.current === "capturing") {
-              // Strip leading wake-word if browser re-emitted the same interim segment containing "يا زكا"
-              const cleanedPiece = ZAKA_WAKE_REGEX.test(rawPiece)
-                ? rawPiece.replace(ZAKA_PREFIX_STRIP_REGEX, "")
+              // Strip leading wake-word if browser re-emitted the same interim segment containing wake word
+              const cleanedPiece = WAKE_WORD_DETECT_REGEX.test(rawPiece)
+                ? extractAfterWakeWord(rawPiece)
                 : rawPiece;
+
+              if (cleanedPiece) {
+                clearWakeGreetingTimer();
+              }
 
               if (isFinal) {
                 newlyFinalized += cleanedPiece + " ";
@@ -587,9 +816,10 @@ export default function AiAgentTab() {
 
           if (liveCommand) {
             clearZakaAwakeTimer();
+            clearWakeGreetingTimer();
             setInputText(liveCommand);
 
-            // Reset 2000ms Smart Silence Debounce for ZAKA command
+            // Reset 2000ms Smart Silence Debounce for ZAZA One-Breath / Captured command
             clearSilenceTimer();
             silenceTimerRef.current = setTimeout(() => {
               silenceTimerRef.current = null;
@@ -614,14 +844,34 @@ export default function AiAgentTab() {
               }
             }, SILENCE_DEBOUNCE_MS);
           } else if (wakeTriggeredNow) {
-            // User said "يا زاقا" and paused; give 8s awake window to speak their command
+            // User called ZAZA alone without an immediate trailing command -> respond with friendly Egyptian male greeting
+            clearWakeGreetingTimer();
+            wakeGreetingTimerRef.current = setTimeout(() => {
+              wakeGreetingTimerRef.current = null;
+              if (
+                isZakaModeRef.current &&
+                zakaPhaseRef.current === "capturing" &&
+                !finalTranscriptRef.current &&
+                !latestInterimRef.current
+              ) {
+                const greeting =
+                  ZAZA_GREETINGS[Math.floor(Math.random() * ZAZA_GREETINGS.length)];
+                setMessages((prev) => [
+                  ...prev,
+                  { role: "assistant", content: greeting, tools: [] },
+                ]);
+                speakReplyRef.current?.(greeting, { resumePhase: "capturing" });
+              }
+            }, 650);
+
             clearZakaAwakeTimer();
             zakaAwakeTimerRef.current = setTimeout(() => {
               if (
                 isZakaModeRef.current &&
                 zakaPhaseRef.current === "capturing" &&
                 !finalTranscriptRef.current &&
-                !latestInterimRef.current
+                !latestInterimRef.current &&
+                !isSpeakingRef.current
               ) {
                 zakaPhaseRef.current = "standby";
                 setZakaPhase("standby");
@@ -771,8 +1021,8 @@ export default function AiAgentTab() {
         setIsListening(false);
         isListeningRef.current = false;
 
-        // Auto-Resume during breath pause (in manual mode) or continuous standby (in ZAKA mode)
-        if (!isUserStoppedRef.current && !isSilenceCompletedRef.current) {
+        // Auto-Resume during breath pause (in manual mode) or continuous standby (in ZAZA mode), but NEVER while TTS is speaking
+        if (!isUserStoppedRef.current && !isSilenceCompletedRef.current && !isSpeakingRef.current) {
           if (latestInterimRef.current) {
             finalTranscriptRef.current = [
               finalTranscriptRef.current,
@@ -806,10 +1056,18 @@ export default function AiAgentTab() {
 
     return () => {
       clearModeSwitchTimer();
+      clearTtsResumeTimer();
+      clearWakeGreetingTimer();
       clearSilenceTimer();
       clearZakaAwakeTimer();
       clearAutoDisarmTimer();
       releaseScreenWakeLock();
+      releaseHandsFreeAudioConstraints();
+      if (typeof window !== "undefined" && "speechSynthesis" in window) {
+        try {
+          window.speechSynthesis.cancel();
+        } catch (_) {}
+      }
       if (resumeTimeoutId) {
         clearTimeout(resumeTimeoutId);
       }
@@ -822,16 +1080,19 @@ export default function AiAgentTab() {
     };
   }, [
     clearModeSwitchTimer,
+    clearTtsResumeTimer,
+    clearWakeGreetingTimer,
     clearSilenceTimer,
     clearZakaAwakeTimer,
     clearAutoDisarmTimer,
     getInsecureOriginWarning,
     playZakaChime,
     releaseScreenWakeLock,
+    releaseHandsFreeAudioConstraints,
     resetZakaAutoDisarmTimer,
   ]);
 
-  // Toggle "🌙 وضع السهرة (زاقا)" (Unified recognitionRef: abort() + 250ms wait before start)
+  // Toggle "🌙 وضع السهرة (ZAZA - ظاظا)" (Unified recognitionRef + Anti-Echo Audio Constraints)
   const toggleZakaMode = async () => {
     if (!speechSupported) {
       setSpeechError(
@@ -841,8 +1102,16 @@ export default function AiAgentTab() {
     }
 
     if (isZakaModeRef.current) {
-      // Turn OFF ZAKA Lounge Mode -> abort() cleanly & return to discreet manual mode
+      // Turn OFF ZAZA Lounge Mode -> abort() cleanly & return to discreet manual mode
       clearAutoDisarmTimer();
+      clearTtsResumeTimer();
+      clearWakeGreetingTimer();
+      if (typeof window !== "undefined" && "speechSynthesis" in window) {
+        try {
+          window.speechSynthesis.cancel();
+        } catch (_) {}
+      }
+      isSpeakingRef.current = false;
       isZakaModeRef.current = false;
       setIsZakaMode(false);
       zakaPhaseRef.current = "off";
@@ -851,11 +1120,12 @@ export default function AiAgentTab() {
       finalTranscriptRef.current = "";
       latestInterimRef.current = "";
       abortVoiceSession();
+      releaseHandsFreeAudioConstraints();
       await releaseScreenWakeLock();
       return;
     }
 
-    // Turn ON ZAKA Lounge Mode: abort any previous session first, wait 250ms, then start night session
+    // Turn ON ZAZA Lounge Mode: enable echoCancellation + noiseSuppression, abort previous, start night session
     finalTranscriptRef.current = "";
     latestInterimRef.current = "";
     setLiveHeardText("");
@@ -867,6 +1137,7 @@ export default function AiAgentTab() {
     setZakaPhase("standby");
 
     playZakaChime();
+    await enableHandsFreeAudioConstraints();
     await requestScreenWakeLock();
     resetZakaAutoDisarmTimer();
     restartRecognitionSafely("standby");
@@ -985,7 +1256,22 @@ export default function AiAgentTab() {
 
     const rawPrompt = (textToSend ?? inputText).trim();
     // Strip optional wake word prefix if user typed or spoke it manually
-    const prompt = rawPrompt.replace(ZAKA_PREFIX_STRIP_REGEX, "").trim() || rawPrompt;
+    const strippedPrompt = rawPrompt.replace(WAKE_WORD_STRIP_REGEX, "").trim();
+    const isWakeWordOnly = WAKE_WORD_DETECT_REGEX.test(rawPrompt) && !strippedPrompt;
+    if (isWakeWordOnly) {
+      const greeting =
+        ZAZA_GREETINGS[Math.floor(Math.random() * ZAZA_GREETINGS.length)];
+      setMessages((prev) => [
+        ...prev,
+        { role: "user", content: rawPrompt, tools: [] },
+        { role: "assistant", content: greeting, tools: [] },
+      ]);
+      setInputText("");
+      speakReplyRef.current?.(greeting, { resumePhase: "capturing" });
+      return;
+    }
+
+    const prompt = normalizeArabicSpeech(strippedPrompt || rawPrompt);
     if (!prompt || isStreaming) return;
 
     if (!socket.connected) {
@@ -1014,6 +1300,7 @@ export default function AiAgentTab() {
     socket.emit("ai_command", {
       text: prompt,
       prompt,
+      rawHeardText: rawPrompt,
       history: historyPayload,
     });
   };
@@ -1190,11 +1477,11 @@ export default function AiAgentTab() {
                 : "bg-zinc-800 hover:bg-zinc-700 text-zinc-100 border-zinc-600"
             }`}
             aria-pressed={isZakaMode}
-            aria-label="تفعيل أو إيقاف وضع السهرة الصوتي بكلمة النداء زاقا"
+            aria-label="تفعيل أو إيقاف وضع السهرة الصوتي بكلمة النداء ZAZA ظاظا"
           >
             <span aria-hidden="true">🌙</span>
             <span>
-              {isZakaMode ? "إغلاق السهرة (زاقا)" : "وضع السهرة (زاقا)"}
+              {isZakaMode ? "إغلاق السهرة (ZAZA - ظاظا)" : "وضع السهرة (ZAZA - ظاظا)"}
             </span>
           </button>
         </div>
@@ -1231,7 +1518,7 @@ export default function AiAgentTab() {
                   onClick={handleRearmZaka}
                   className="min-h-10 px-3 py-1 rounded-lg bg-teal-600 hover:bg-teal-500 text-white font-bold border border-teal-300 focus-visible:outline-none focus-visible:ring-4 focus-visible:ring-amber-400"
                 >
-                  🔄 تنشيط زاقا
+                  🔄 تنشيط ZAZA — ظاظا
                 </button>
               </>
             ) : zakaPhase === "capturing" ? (
@@ -1241,7 +1528,7 @@ export default function AiAgentTab() {
             ) : (
               <span className="text-zinc-300">
                 🌙 [{isListening ? "● المايك نشط" : "… جاري تهيئة المايك"}] | نادي بـ{" "}
-                <strong className="text-amber-300">«يا زكا / يا زاقا»</strong> متبوعاً بأمرك أو انتظر نغمة التأكيد
+                <strong className="text-amber-300">«يا ظاظا / زازا / ZAZA»</strong> متبوعاً بأمرك أو انتظر الرد
               </span>
             )}
           </div>
@@ -1400,7 +1687,7 @@ export default function AiAgentTab() {
             }`}
           >
             <div className="flex items-center justify-between gap-2 border-b border-zinc-800 pb-1 text-xs font-bold text-zinc-300">
-              <span>{msg.role === "user" ? "👤 أنت" : "🤖 زاقا (ZAKA)"}</span>
+              <span>{msg.role === "user" ? "👤 أنت" : "🤖 ZAZA — ظاظا"}</span>
               {msg.routeInfo?.targetModel === "local-fast-path" && (
                 <span className="px-1.5 py-0.5 rounded bg-zinc-950 border border-teal-600 text-teal-300 font-mono text-[10px]">
                   ⚡ مجاني 0 توكن
@@ -1422,6 +1709,19 @@ export default function AiAgentTab() {
                     ⚙️ نفذت {t.name}
                   </span>
                 ))}
+              </div>
+            )}
+
+            {/* Compact Debug Trace Badge: [Heard Text ◄ Domain ◄ Model ◄ Tokens] */}
+            {msg.role === "assistant" && msg.debugTrace && (
+              <div
+                className="mt-1 pt-1.5 border-t border-zinc-800 text-[11px] font-mono text-zinc-300 flex flex-wrap items-center gap-1"
+                aria-label="تشخيص المسار والأداة"
+              >
+                <span className="px-1.5 py-0.5 rounded bg-zinc-950 border border-zinc-700 text-zinc-200 max-w-full truncate">
+                  [🎙️ {msg.debugTrace.heardText || "—"} ◄ 📦 {msg.debugTrace.domain || "chat"} ◄ 🤖{" "}
+                  {msg.debugTrace.model || "—"} ◄ 🪙 {msg.debugTrace.tokens ?? 0} توكن]
+                </span>
               </div>
             )}
           </div>
@@ -1632,7 +1932,7 @@ export default function AiAgentTab() {
             }
             title={
               isZakaMode
-                ? "اضغط للتحدث فوراً مع زاقا"
+                ? "اضغط للتحدث فوراً مع ZAZA — ظاظا"
                 : isActivelyCapturingVoice
                   ? "إيقاف الاستماع"
                   : "تحدث بالمايك (وضع صامت عند الطلب)"
@@ -1660,12 +1960,12 @@ export default function AiAgentTab() {
             }}
             placeholder={
               isZakaMode
-                ? 'نادي "يا زاقا..." أو اكتب طلبك'
+                ? 'نادي "يا ظاظا..." أو اكتب طلبك'
                 : "اكتب طلبك أو اضغط 🎙️..."
             }
             disabled={isStreaming}
             className="flex-1 min-h-[42px] max-h-[88px] py-2 px-2.5 bg-transparent text-zinc-50 text-base leading-snug placeholder-zinc-400 resize-none overflow-y-auto focus:outline-none disabled:opacity-50"
-            aria-label="رسالة نصية للمساعد الذكي زاقا"
+            aria-label="رسالة نصية للمساعد الذكي ZAZA — ظاظا"
           />
 
           {/* Integrated Send Button */}

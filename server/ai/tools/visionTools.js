@@ -1,24 +1,31 @@
 import { tool } from 'ai';
 import { z } from 'zod';
-import { exec } from 'child_process';
+import { execFile } from 'child_process';
 import fs from 'fs';
 import path from 'path';
 import os from 'os';
 import { generateText } from 'ai';
 import { createGoogleGenerativeAI } from '@ai-sdk/google';
 
+// Strictly multimodal vision models (NEVER text-only models like Groq)
+const MULTIMODAL_VISION_MODELS = [
+  'gemini-3.1-flash-lite',
+  'gemma-4-31b-it',
+  'gemini-3-flash-preview',
+];
+
 /**
- * AI Tool: Capture a live screenshot of Windows primary display and analyze it visually via Gemini 3.1 Flash-Lite
+ * AI Tool: Capture a live screenshot of Windows primary display and analyze it visually via Multimodal Vision
  */
 export const captureAndAnalyzeScreen = tool({
   description:
-    'التقاط صورة لحظية لشاشة الكمبيوتر الحالية وتحليلها بصرياً باستخدام الذكاء الاصطناعي للإجابة عن سؤال المستخدم عما يظهر على الشاشة (مثل قراءة خطأ، معرفة البرنامج المفتوح، أو وصف المحتوى).',
+    'التقاط لقطة شاشة حقيقية (Screenshot) للشاشة الحالية وتحليلها بصرياً عبر موديل رؤية (Multimodal Vision). استخدم هذه الأداة دائماً عند أي سؤال عما يظهر على الشاشة أو أي إشارة مكانية/بصرية مثل: "إنت شايف إيه دلوقتي"، "بص على الشاشة"، "اقرأ الشاشة"، "أول فيديو على اليمين"، "اضغط على التاني على الشمال". Examples: "what do you see on screen", "first video on the right".',
   inputSchema: z.object({
     question: z
       .string()
       .optional()
       .default('صف باختصار ووضوح ما يظهر حالياً على شاشة الكمبيوتر باللغة العربية.')
-      .describe('سؤال المستخدم حول محتوى الشاشة الحالية'),
+      .describe('سؤال المستخدم أو العنصر المكاني المطلوب تحديده على الشاشة الحالية (مثال: "إنت شايف إيه دلوقتي" أو "حدد أول فيديو على اليمين")'),
   }),
   execute: async ({ question }) => {
     const tempFilePath = path.join(os.tmpdir(), `screen_capture_${Date.now()}.png`);
@@ -35,20 +42,31 @@ export const captureAndAnalyzeScreen = tool({
       '$bmp.Dispose();',
     ].join(' ');
 
+    console.log(`[Tool:captureAndAnalyzeScreen] Capturing live Windows screenshot for question: "${question || 'describe screen'}"`);
+
     try {
-      // 1. Capture screen to temporary PNG
-      await new Promise((resolve, reject) => {
-        exec(
-          `powershell -NoProfile -Command "${psScript}"`,
-          { shell: 'cmd.exe', timeout: 8000 },
-          (err, stdout, stderr) => {
-            if (err) {
-              return reject(new Error(stderr?.trim() || err.message));
+      // 1. Capture screen to temporary PNG via direct execFile powershell.exe (15s timeout + 1 retry on cold start)
+      const captureOnce = () =>
+        new Promise((resolve, reject) => {
+          execFile(
+            'powershell.exe',
+            ['-NoProfile', '-WindowStyle', 'Hidden', '-Command', psScript],
+            { timeout: 15000 },
+            (err, stdout, stderr) => {
+              if (err) {
+                return reject(new Error(stderr?.trim() || err.message));
+              }
+              resolve();
             }
-            resolve();
-          }
-        );
-      });
+          );
+        });
+
+      try {
+        await captureOnce();
+      } catch (firstCapErr) {
+        console.warn('[Tool:captureAndAnalyzeScreen] First screenshot capture attempt failed, retrying once:', firstCapErr.message);
+        await captureOnce();
+      }
 
       if (!fs.existsSync(tempFilePath)) {
         throw new Error('لم يتم إنشاء ملف لقطة الشاشة المؤقت.');
@@ -56,8 +74,9 @@ export const captureAndAnalyzeScreen = tool({
 
       // 2. Read PNG buffer
       const imageBuffer = fs.readFileSync(tempFilePath);
+      console.log(`[Tool:captureAndAnalyzeScreen] Screenshot captured (${imageBuffer.length} bytes). Sending to Multimodal Vision...`);
 
-      // 3. Analyze using Gemini 3.1 Flash-Lite multimodal
+      // 3. Analyze using Multimodal Vision models ONLY (15s timeout each)
       const apiKey = (process.env.GOOGLE_GENERATIVE_AI_API_KEY || process.env.GEMINI_API_KEY || '').trim();
       if (!apiKey) {
         throw new Error('مفتاح Gemini API غير موجود في ملف .env');
@@ -67,55 +86,59 @@ export const captureAndAnalyzeScreen = tool({
       const userPrompt = (question || 'صف ما تراه على الشاشة الحالية بإيجاز واضح باللغة العربية.').trim();
 
       let text = '';
-      try {
-        const res = await generateText({
-          model: google('gemini-3.1-flash-lite'),
-          abortSignal: AbortSignal.timeout(12000),
-          maxRetries: 0,
-          messages: [
-            {
-              role: 'user',
-              content: [
-                { type: 'text', text: userPrompt },
-                { type: 'image', image: imageBuffer },
-              ],
-            },
-          ],
-        });
-        text = res.text;
-      } catch (visionErr) {
-        // Fallback to gemma-4-31b-it multimodal if gemini-3.1-flash-lite hits 15 RPM rate limit
-        if (/429|quota|rate|exhausted|timeout|aborted/i.test(visionErr.message || '')) {
-          const fallbackRes = await generateText({
-            model: google('gemma-4-31b-it'),
-            abortSignal: AbortSignal.timeout(14000),
+      let usedModel = MULTIMODAL_VISION_MODELS[0];
+      let lastVisionErr = null;
+
+      for (const visionModel of MULTIMODAL_VISION_MODELS) {
+        try {
+          console.log(`[Tool:captureAndAnalyzeScreen] Calling multimodal model: ${visionModel} (timeout 15s)`);
+          const res = await generateText({
+            model: google(visionModel),
+            abortSignal: AbortSignal.timeout(15000),
             maxRetries: 0,
             messages: [
               {
                 role: 'user',
                 content: [
                   { type: 'text', text: userPrompt },
-                  { type: 'image', image: imageBuffer },
+                  { type: 'file', data: imageBuffer, mediaType: 'image/png' },
                 ],
               },
             ],
           });
-          text = fallbackRes.text;
-        } else {
+          text = res.text;
+          usedModel = visionModel;
+          break;
+        } catch (visionErr) {
+          lastVisionErr = visionErr;
+          console.warn(`[Tool:captureAndAnalyzeScreen] Model ${visionModel} failed: ${visionErr.message}`);
+          if (/429|503|quota|rate|exhausted|timeout|aborted|overloaded|high demand/i.test(visionErr.message || '')) {
+            continue;
+          }
           throw visionErr;
         }
       }
 
+      if (!text && lastVisionErr) {
+        throw lastVisionErr;
+      }
+
+      console.log(`[Tool:captureAndAnalyzeScreen] Success via ${usedModel} (${text.length} chars)`);
       return {
         success: true,
-        model: 'gemini-3.1-flash-lite',
+        action: 'capture_and_analyze_screen',
+        details: { model: usedModel, screenshotBytes: imageBuffer.length, question: userPrompt },
+        error: null,
+        model: usedModel,
         analysis: text,
         message: text,
       };
     } catch (err) {
-      console.error('[visionTools:captureAndAnalyzeScreen Error]:', err.message);
+      console.error('[Tool:captureAndAnalyzeScreen Error]:', err.message);
       return {
         success: false,
+        action: 'capture_and_analyze_screen',
+        details: { question },
         error: err.message,
         message: `تعذر التقاط أو تحليل الشاشة: ${err.message}`,
       };
