@@ -1,4 +1,7 @@
 import assert from 'assert';
+import fs from 'fs';
+import os from 'os';
+import path from 'path';
 import { controlPower } from '../ai/tools/powerTools.js';
 import { listOrKillProcess, runTerminalCommand } from '../ai/tools/systemCliTools.js';
 import { fileOperation } from '../ai/tools/officeFileTools.js';
@@ -29,6 +32,21 @@ async function runTests() {
     assert.strictEqual(res.status, 'awaiting_confirmation', `Command should be blocked: ${cmd}`);
     assert.ok(res.pendingAction?.id, `Blocked command should have pendingAction.id: ${cmd}`);
   }
+
+  // 4. Verify serverConfirmed: true actually deletes a temp file and verifies Ground Truth
+  const tempFile = path.join(os.tmpdir(), `p0_security_test_${Date.now()}.txt`);
+  fs.writeFileSync(tempFile, 'temporary test file', 'utf8');
+  assert.strictEqual(fs.existsSync(tempFile), true, 'Temp file should exist before delete');
+
+  const blockedDel = await fileOperation.execute({ action: 'delete', target: tempFile });
+  assert.strictEqual(blockedDel.status, 'awaiting_confirmation', 'Unconfirmed delete should pause');
+  assert.ok(blockedDel.pendingAction?.id, 'Blocked delete should have pendingAction.id');
+  assert.strictEqual(fs.existsSync(tempFile), true, 'Temp file must still exist before confirmation');
+
+  const confirmedDel = await fileOperation.execute(blockedDel.pendingAction.args, { serverConfirmed: true });
+  assert.strictEqual(confirmedDel.success, true, 'Confirmed delete should succeed');
+  assert.strictEqual(confirmedDel.verified, true, 'Confirmed delete should be verified');
+  assert.strictEqual(fs.existsSync(tempFile), false, 'Temp file must be deleted from disk');
 
   console.log('✓ All P0 security tests passed!');
 }

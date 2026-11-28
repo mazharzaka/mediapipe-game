@@ -18,7 +18,7 @@ export const controlPower = tool({
       .optional()
       .describe('سبب أو توضيح إضافي لأمر الطاقة'),
   }),
-  execute: async ({ action, reason }, options) => {
+  execute: async ({ action, reason }, { serverConfirmed = false } = {}) => {
     // 1. Lock screen: Instant and fully safe
     if (action === 'lock') {
       return new Promise((resolve) => {
@@ -75,7 +75,7 @@ export const controlPower = tool({
       restart: 'إعادة تشغيل الكمبيوتر (Restart)',
     };
 
-    if (!options?.__serverConfirmed) {
+    if (serverConfirmed !== true) {
       console.warn(`[powerTools:controlPower] Blocked unconfirmed power action: ${action}`);
       const actionId = crypto.randomUUID();
       return {
@@ -104,12 +104,12 @@ export const controlPower = tool({
     return new Promise((resolve) => {
       exec(cmd, { shell: 'cmd.exe' }, (err) => {
         if (err) {
-          resolve({ success: false, error: `فشل تنفيذ أمر الطاقة: ${err.message}` });
+          resolve({ success: false, verified: false, error: `فشل تنفيذ أمر الطاقة: ${err.message}` });
         } else {
           resolve({
             success: true,
+            verified: true,
             action,
-            confirmed: true,
             message: `✓ تم تأكيد الأمر: جاري تنفيذ ${actionTitles[action]} خلال 10 ثوانٍ (يمكنك إلغاؤه خلال المهلة).`,
           });
         }

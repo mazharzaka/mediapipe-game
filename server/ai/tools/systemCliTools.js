@@ -147,7 +147,7 @@ export const runTerminalCommand = tool({
       .optional()
       .describe('ضع true إذا كان الأمر يستمر في العمل مثل dev server أو مراقب ملفات'),
   }),
-  execute: async ({ command, cwd, isLongRunning }, options) => {
+  execute: async ({ command, cwd, isLongRunning }, { serverConfirmed = false } = {}) => {
     const trimmedCommand = (command || '').trim();
     if (!trimmedCommand) {
       return { success: false, exitCode: 1, stdout: '', stderr: 'لم يتم تمرير أي أمر للتنفيذ.' };
@@ -167,7 +167,7 @@ export const runTerminalCommand = tool({
       /\bdiskpart\b/,
     ];
     const isDestructive = destructivePatterns.some((rx) => rx.test(lowerCmd));
-    if (isDestructive && !options?.__serverConfirmed) {
+    if (isDestructive && serverConfirmed !== true) {
       console.warn(`[systemCliTools:runTerminalCommand] Blocked unconfirmed destructive command: ${trimmedCommand}`);
       const actionId = crypto.randomUUID();
       return {
@@ -271,7 +271,7 @@ export const listOrKillProcess = tool({
     processName: z.string().optional().describe('اسم البرنامج مثل node.exe أو Code.exe للبحث أو الإغلاق'),
     pid: z.number().optional().describe('معرف العملية (PID) لإنهائها بدقة عند اختيار kill'),
   }),
-  execute: async ({ action, port, processName, pid }, options) => {
+  execute: async ({ action, port, processName, pid }, { serverConfirmed = false } = {}) => {
     if (action === 'find_port') {
       if (!port) {
         return { success: false, error: 'يجب تحديد رقم البورت (port) للبحث عنه.' };
@@ -301,7 +301,7 @@ export const listOrKillProcess = tool({
 
     if (action === 'kill') {
       const targetDesc = pid ? `PID ${pid}` : processName || 'عملية غير محددة';
-      if (!options?.__serverConfirmed) {
+      if (serverConfirmed !== true) {
         console.warn(`[systemCliTools:listOrKillProcess] Blocked unconfirmed process kill: ${targetDesc}`);
         const actionId = crypto.randomUUID();
         return {
@@ -337,12 +337,14 @@ export const listOrKillProcess = tool({
           if (err) {
             resolve({
               success: false,
+              verified: false,
               error: stderr.trim() || err.message,
               message: `فشل إنهاء العملية: ${stderr.trim() || err.message}`,
             });
           } else {
             resolve({
               success: true,
+              verified: true,
               message: `✓ تم إنهاء العملية بنجاح (${pid ? `PID: ${pid}` : processName}).`,
               details: stdout.trim(),
             });

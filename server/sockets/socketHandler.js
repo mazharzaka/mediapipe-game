@@ -274,6 +274,38 @@ export function setupSocketHandler(io) {
         let toolNameUsed;
         let toolArgsUsed;
 
+        if (fastPathMatch.requiresBrowserForeground) {
+          // Check if foreground window is a supported browser (chrome, msedge, brave, firefox)
+          let isBrowserForeground = false;
+          try {
+            const { execSync } = await import("child_process");
+            const procName = execSync(
+              'powershell -NoProfile -Command "(Get-Process | Where-Object {$_.MainWindowHandle -eq (Add-Type -MemberDefinition \'[DllImport(\\\"user32.dll\\\")]public static extern IntPtr GetForegroundWindow();\' -Name W -Namespace N -PassThru)::GetForegroundWindow()}).ProcessName"',
+              { encoding: "utf8", timeout: 1500, windowsHide: true }
+            ).trim().toLowerCase();
+            isBrowserForeground = ["chrome", "msedge", "brave", "firefox"].some((b) => procName.includes(b));
+          } catch {
+            isBrowserForeground = false;
+          }
+          if (!isBrowserForeground) {
+            const noBrowserReply = "مفيش متصفح مفتوح قدامك دلوقتي يا باشا.";
+            socket.emit("ai_stream_chunk", { chunk: noBrowserReply, fullText: noBrowserReply });
+            socket.emit("ai_stream_done", {
+              text: noBrowserReply,
+              model: "local-fast-path",
+              executedTools: [],
+              debugTrace: {
+                heardText: payload?.rawHeardText || prompt,
+                cleanText: prompt.trim(),
+                domain: "browser",
+                model: "local-fast-path",
+                tokens: 0,
+              },
+            });
+            return;
+          }
+        }
+
         if (fastPathMatch.type === "scroll") {
           await nutService.scroll(fastPathMatch.direction, fastPathMatch.amount || 5);
           execResult = {
@@ -283,6 +315,26 @@ export function setupSocketHandler(io) {
           };
           toolNameUsed = "localScroll";
           toolArgsUsed = { direction: fastPathMatch.direction, amount: fastPathMatch.amount || 5 };
+        } else if (fastPathMatch.type === "power") {
+          execResult = await aiTools.controlPower.execute({ action: fastPathMatch.action });
+          toolNameUsed = "controlPower";
+          toolArgsUsed = { action: fastPathMatch.action };
+        } else if (fastPathMatch.type === "tab") {
+          execResult = await aiTools.browserTabAction.execute({ action: fastPathMatch.action });
+          toolNameUsed = "browserTabAction";
+          toolArgsUsed = { action: fastPathMatch.action };
+        } else if (fastPathMatch.type === "port") {
+          execResult = await aiTools.listOrKillProcess.execute({ action: "find_port", port: fastPathMatch.port });
+          toolNameUsed = "listOrKillProcess";
+          toolArgsUsed = { action: "find_port", port: fastPathMatch.port };
+        } else if (fastPathMatch.type === "app") {
+          execResult = await aiTools.openApplication.execute({ appName: fastPathMatch.appName });
+          toolNameUsed = "openApplication";
+          toolArgsUsed = { appName: fastPathMatch.appName };
+        } else if (fastPathMatch.type === "url") {
+          execResult = await aiTools.openBrowserUrl.execute({ url: fastPathMatch.url });
+          toolNameUsed = "openBrowserUrl";
+          toolArgsUsed = { url: fastPathMatch.url };
         } else {
           execResult = await controlMediaPlayback.execute({
             action: fastPathMatch.action,
@@ -376,6 +428,44 @@ export function setupSocketHandler(io) {
         reasoning: routeInfo?.reasoning || "",
       });
 
+      // Direct Call Execution (skip second LLM call for clear single-tool tasks)
+      if (
+        !requiresConfirmation &&
+        routeInfo?.directCall?.tool &&
+        aiTools[routeInfo.directCall.tool]?.execute
+      ) {
+        const directToolName = routeInfo.directCall.tool;
+        const directArgs = routeInfo.directCall.args || {};
+        console.log(`[DirectCall] Executing ${directToolName} directly without second LLM`);
+        try {
+          const execResult = await aiTools[directToolName].execute(directArgs, {
+            messages: [],
+          });
+          const executedToolEntry = {
+            name: directToolName,
+            args: directArgs,
+            result: execResult,
+          };
+          const replyText =
+            execResult?.success === false
+              ? `مقدرتش أنفذ الأمر: ${execResult?.error || "حصلت مشكلة"}`
+              : "تمام يا باشا، نفذتلك الأمر فوراً.";
+          socket.emit("ai_stream_chunk", {
+            chunk: replyText,
+            fullText: replyText,
+            toolCompleted: executedToolEntry,
+          });
+          socket.emit("ai_stream_done", {
+            text: replyText,
+            model: "router-direct-call",
+            executedTools: [executedToolEntry],
+          });
+          return;
+        } catch (dcErr) {
+          console.warn(`[DirectCall Error] Falling back to agent:`, dcErr.message);
+        }
+      }
+
       // Human-in-the-Loop Guard: If router determined this is a critical action (e.g. Shutdown, Restart)
       // halt immediate execution and prompt user for explicit confirmation
       if (requiresConfirmation) {
@@ -400,12 +490,11 @@ export function setupSocketHandler(io) {
 
         pendingActionsMap.set(actionId, {
           socketId: socket.id,
+          source: "router_guard",
           isRouterConfirmation: true,
           actionId,
-          toolName,
           realAction,
           action: realAction,
-          args: toolName === "controlPower" ? { action: realAction, reason: effectiveText } : {},
           expiresAt: Date.now() + 30000,
           prompt: effectiveText,
           history,
@@ -704,8 +793,20 @@ export function setupSocketHandler(io) {
     });
 
     // Human-in-the-Loop Confirmation for sensitive actions (server-authoritative)
-    socket.on("ai_confirm_action", async ({ actionId, confirmed }) => {
-      const pending = actionId ? pendingActionsMap.get(actionId) : null;
+    socket.on("ai_confirm_action", async (payload = {}) => {
+      let { actionId, confirmed } = payload || {};
+      let pending = actionId ? pendingActionsMap.get(actionId) : null;
+
+      // Safe fallback: find the latest pending action for this socket.id if actionId was omitted
+      if (!pending && !actionId) {
+        for (const [id, entry] of pendingActionsMap.entries()) {
+          if (entry.socketId === socket.id) {
+            actionId = id;
+            pending = entry;
+          }
+        }
+      }
+
       console.log(
         `[AI HITL] Confirmation received: ${actionId}, confirmed: ${confirmed}, found: ${Boolean(pending)}`,
       );
@@ -749,31 +850,130 @@ export function setupSocketHandler(io) {
           fullText: `تم التأكيد. جاري تنفيذ الإجراء (${realAction}) الآن.`,
         });
 
+        // Case 1: Confirmed from Router Guard (no pre-extracted toolName/args) -> re-run agent with original prompt & serverConfirmed: true
+        if (pending.source === "router_guard" || !pending.toolName) {
+          const baseTools = pending.filteredTools || aiTools;
+          const confirmedTools = {};
+          for (const [tName, tDef] of Object.entries(baseTools)) {
+            confirmedTools[tName] = {
+              ...tDef,
+              execute: async (args) => tDef.execute(args, { serverConfirmed: true }),
+            };
+          }
+
+          let fullText = "";
+          const executedTools = [];
+          const result = streamAiResponse({
+            prompt: pending.prompt,
+            history: pending.history || [],
+            model: pending.targetModel,
+            tools: confirmedTools,
+            maxSteps: pending.maxSteps || 5,
+            domain: pending.domain || "general",
+            onError: (err) => {
+              console.error("[AI HITL Router Guard Stream Error]:", err);
+            },
+          });
+
+          for await (const part of result.fullStream) {
+            if (part.type === "text-delta") {
+              const delta = part.textDelta || part.text || "";
+              if (delta) {
+                fullText += delta;
+                socket.emit("ai_stream_chunk", { chunk: delta, fullText });
+              }
+            } else if (part.type === "tool-call") {
+              socket.emit("ai_stream_chunk", {
+                chunk: "",
+                fullText,
+                activeTool: { name: part.toolName, args: part.args || part.input || {} },
+              });
+            } else if (part.type === "tool-result") {
+              const res = part.result || part.output;
+              const toolResultInfo = {
+                name: part.toolName,
+                args: part.args || part.input || {},
+                result: res,
+              };
+              executedTools.push(toolResultInfo);
+              socket.emit("ai_stream_chunk", {
+                chunk: "",
+                fullText,
+                toolCompleted: toolResultInfo,
+              });
+            }
+          }
+
+          const lastToolResult = executedTools[executedTools.length - 1]?.result;
+          const isSuccess = executedTools.length > 0
+            ? lastToolResult?.success === true
+            : Boolean(fullText);
+
+          if (isSuccess) {
+            socket.emit("ai_action_confirmed", {
+              actionId,
+              action: realAction,
+              success: true,
+              verified: lastToolResult?.verified === true,
+              message: lastToolResult?.message || fullText || "تم التنفيذ بنجاح.",
+            });
+          } else {
+            socket.emit("ai_action_confirmed", {
+              actionId,
+              action: realAction,
+              success: false,
+              error: lastToolResult?.error || lastToolResult?.message || "فشل تنفيذ الإجراء.",
+            });
+          }
+
+          socket.emit("ai_stream_done", {
+            text: fullText || lastToolResult?.message || "تمت معالجة الطلب.",
+            executedTools,
+          });
+          return;
+        }
+
+        // Case 2: Confirmed from a specific tool call (toolName && args)
         let execResult;
         if (pending.toolName && aiTools[pending.toolName]) {
           execResult = await aiTools[pending.toolName].execute(pending.args || {}, {
-            __serverConfirmed: true,
+            serverConfirmed: true,
           });
         } else {
           execResult = await systemService.executePowerAction(realAction);
         }
 
-        socket.emit("ai_action_confirmed", {
-          actionId,
-          action: realAction,
-          success: execResult?.success !== false,
-          message: execResult?.message || "تم التنفيذ.",
-        });
-        socket.emit("ai_stream_done", {
-          text: `تم التأكيد وتنفيذ الإجراء (${realAction}) بنجاح: ${execResult?.message || ""}`,
-          executedTools: [
-            {
-              name: pending.toolName || "controlPower",
-              args: pending.args || { action: realAction },
-              result: execResult,
-            },
-          ],
-        });
+        const isVerifiedSuccess = execResult?.success === true && execResult?.verified === true;
+
+        if (isVerifiedSuccess) {
+          socket.emit("ai_action_confirmed", {
+            actionId,
+            action: realAction,
+            success: true,
+            verified: true,
+            message: execResult?.message || "تم التنفيذ والتحقق بنجاح.",
+          });
+          socket.emit("ai_stream_done", {
+            text: `تم التأكيد وتنفيذ الإجراء (${realAction}) بنجاح: ${execResult?.message || ""}`,
+            executedTools: [
+              {
+                name: pending.toolName || "controlPower",
+                args: pending.args || { action: realAction },
+                result: execResult,
+              },
+            ],
+          });
+        } else {
+          const failureReason =
+            execResult?.error || execResult?.message || "فشل تنفيذ الإجراء أو التحقق من نتيجته على النظام.";
+          socket.emit("ai_action_confirmed", {
+            actionId,
+            action: realAction,
+            success: false,
+            verified: false,
+            error: failureReason,
+          });
+        }
       } catch (err) {
         console.error("[AI HITL Execution Error]:", err);
         socket.emit("ai_action_confirmed", {

@@ -84,103 +84,211 @@ export function matchZeroTokenFastPath(rawPrompt) {
 
   if (!cleaned) return null;
 
+  // Normalize extra "الـ" on known site names
+  const siteAlMap = {
+    "اليوتيوب": "يوتيوب",
+    "الفيسبوك": "فيسبوك",
+    "الفيس بوك": "فيسبوك",
+    "الجوجل": "جوجل",
+    "الواتساب": "واتساب",
+    "الانستجرام": "انستجرام",
+    "التويتر": "تويتر",
+    "اللينكد ان": "لينكد ان",
+    "الجيت هاب": "جيت هاب",
+    "النتفليكس": "نتفليكس",
+  };
+  for (const [k, v] of Object.entries(siteAlMap)) {
+    if (cleaned.includes(k)) {
+      cleaned = cleaned.replaceAll(k, v);
+    }
+  }
+
   // Do NOT hijack compound multi-step commands (e.g. "شغل ملخص ماتش وعلي الصوت")
   if (/\s+و(?:شغل|افتح|اقفل|اعمل|جيب|هات|بص)\b/i.test(cleaned)) {
     return null;
   }
 
-  // 1. Volume Up: علي شوية / علي الصوت / زود الصوت / ارفع الصوت (7 consecutive pulses = ~14%)
-  if (
-    /^(?:علي|عالي|زود|ارفع)(?:\s+(?:لي|لنا))?(?:\s+الصوت)?(?:\s+(?:شويه|كمان|اكتر|سنه|قوي|حبه|بسيطه))*$/i.test(
-      cleaned,
-    ) &&
-    (/(?:الصوت|شويه|كمان|اكتر|سنه|قوي|حبه|بسيطه)/i.test(cleaned) ||
-      /^(?:علي|ارفع|زود)$/i.test(cleaned))
-  ) {
-    const isStrong = /كمان|اكتر|قوي/.test(cleaned);
+  const lower = cleaned.toLowerCase();
+
+  // 1. Volume Up
+  if (["علي الصوت", "علي", "زود الصوت", "ارفع الصوت", "علي شويه", "علي الصوت شويه"].includes(lower)) {
     return {
       type: "media",
       action: "volume_up",
-      repeat: isStrong ? 10 : 7,
+      repeat: 7,
       tokensUsed: 0,
-      reply: "🔊 علّيتلك الصوت فوراً يا باشا (+14% مسار محلي مجاني).",
+      reply: "علّيتلك الصوت يا باشا.",
     };
   }
 
-  // 2. Volume Down: وطي شوية / وطي الصوت / قلل الصوت / نزل الصوت / اخفض الصوت / هدي الصوت
-  if (
-    /^(?:وطي|واطي|قلل|نزل|اخفض|هدي)(?:\s+(?:لي|لنا))?(?:\s+الصوت)?(?:\s+(?:شويه|كمان|سنه|خالص|حبه|بسيطه))*$/i.test(
-      cleaned,
-    ) &&
-    (/(?:الصوت|شويه|كمان|سنه|خالص|حبه|بسيطه)/i.test(cleaned) ||
-      /^(?:وطي|قلل|اخفض|هدي)$/i.test(cleaned))
-  ) {
-    const isStrong = /كمان|خالص/.test(cleaned);
+  // 2. Volume Down
+  if (["وطي الصوت", "وطي", "قلل الصوت", "نزل الصوت", "وطي شويه", "وطي الصوت شويه"].includes(lower)) {
     return {
       type: "media",
       action: "volume_down",
-      repeat: isStrong ? 10 : 7,
+      repeat: 7,
       tokensUsed: 0,
-      reply: "🔉 وطّيتلك الصوت فوراً يا باشا (-14% مسار محلي مجاني).",
+      reply: "وطّيتلك الصوت يا باشا.",
     };
   }
 
-  // 3. Mute / Unmute: اعمل ميوت / اكتم الصوت / ميوت
-  if (/^(?:(?:اعمل\s+)?ميوت|اكتم(?:\s+الصوت)?|كتم\s+الصوت|mute)$/i.test(cleaned)) {
+  // 3. Mute / Unmute
+  if (["ميوت", "اعمل ميوت", "اكتم الصوت", "اكتم", "mute"].includes(lower)) {
     return {
       type: "media",
       action: "mute",
       repeat: 1,
       tokensUsed: 0,
-      reply: "🔇 تم كتم/إلغاء كتم الصوت فوراً (مسار محلي مجاني).",
+      reply: "كتمتلك الصوت يا باشا.",
     };
   }
 
-  // 4. Play / Pause: وقف الفيديو / شغل الفيديو / بوز / كمل الفيديو
-  if (
-    /^(?:وقف(?:\s+(?:الفيديو|الميديا|التشغيل|الصوت))?|شغل\s+الفيديو|كمل(?:\s+(?:الفيديو|التشغيل))?|استمر|بوز|ستوب|pause|resume)$/i.test(
-      cleaned,
-    )
-  ) {
+  // 4. Play / Pause
+  if (["وقف الفيديو", "وقف", "شغل الفيديو", "كمل الفيديو", "كمل", "بوز", "ستوب", "pause", "resume"].includes(lower)) {
     return {
       type: "media",
       action: "play_pause",
       repeat: 1,
       tokensUsed: 0,
-      reply: "⏯️ تم إيقاف/تشغيل الفيديو فوراً (مسار محلي مجاني).",
+      reply: "تم يا باشا.",
     };
   }
 
-  // 5. Scroll Down: انزل تحت / انزل تحت شوية / سكرول لتحت / نزل الصفحة / scroll down
-  if (
-    /^(?:انزل(?:\s+(?:تحت|لتحت))?|سكرول\s+(?:تحت|لتحت)|نزل\s+الصفحه|scroll\s+down)(?:\s+(?:شويه|كمان|اكتر|سنه))*$/i.test(
-      cleaned,
-    )
-  ) {
+  // 5. Next video
+  if (["التالي", "الفيديو اللي بعده", "اللي بعده", "next"].includes(lower)) {
+    return {
+      type: "media",
+      action: "next",
+      repeat: 1,
+      tokensUsed: 0,
+      reply: "جبتلك الفيديو اللي بعده يا باشا.",
+    };
+  }
+
+  // 6. Scroll Down / Up
+  if (["انزل تحت", "انزل", "سكرول تحت", "نزل الصفحه", "scroll down"].includes(lower)) {
     return {
       type: "scroll",
       action: "scroll_down",
       direction: "down",
       amount: 5,
       tokensUsed: 0,
-      reply: "⬇️ تم التمرير لأسفل فوراً (مسار محلي مجاني).",
+      reply: "نزلتلك الصفحة لتحت.",
     };
   }
-
-  // 6. Scroll Up: اطلع فوق / اطلع فوق شوية / سكرول لفوق / طلع الصفحة / scroll up
-  if (
-    /^(?:اطلع(?:\s+(?:فوق|لفوق))?|سكرول\s+(?:فوق|لفوق)|طلع\s+الصفحه|scroll\s+up)(?:\s+(?:شويه|كمان|اكتر|سنه))*$/i.test(
-      cleaned,
-    )
-  ) {
+  if (["اطلع فوق", "اطلع", "سكرول فوق", "طلع الصفحه", "scroll up"].includes(lower)) {
     return {
       type: "scroll",
       action: "scroll_up",
       direction: "up",
       amount: 5,
       tokensUsed: 0,
-      reply: "⬆️ تم التمرير لأعلى فوراً (مسار محلي مجاني).",
+      reply: "طلعتلك الصفحة لفوق.",
     };
+  }
+
+  // 7. Lock Screen
+  if (["اقفل الشاشه", "اعمل لوك", "لوك", "lock", "lock screen"].includes(lower)) {
+    return {
+      type: "power",
+      action: "lock",
+      tokensUsed: 0,
+      reply: "قفلتلك الشاشة يا باشا.",
+    };
+  }
+
+  // 8. Simple Browser Tab Commands (requires browser foreground check in socketHandler)
+  if (["اقفل التاب", "قفل التاب", "close tab"].includes(lower)) {
+    return {
+      type: "tab",
+      action: "close_current_tab",
+      requiresBrowserForeground: true,
+      tokensUsed: 0,
+      reply: "قفلتلك التاب يا باشا.",
+    };
+  }
+  if (["تاب جديد", "افتح تاب جديد", "new tab"].includes(lower)) {
+    return {
+      type: "tab",
+      action: "new_tab",
+      requiresBrowserForeground: true,
+      tokensUsed: 0,
+      reply: "فتحتلك تاب جديد.",
+    };
+  }
+
+  // 9. Explicit Port Commands (e.g. "port 3000" or "بورت 3000")
+  if (lower.startsWith("port ") || lower.startsWith("بورت ")) {
+    const portNum = parseInt(lower.split(/\s+/)[1], 10);
+    if (Number.isInteger(portNum) && portNum > 0 && portNum <= 65535) {
+      return {
+        type: "port",
+        port: portNum,
+        tokensUsed: 0,
+        reply: `بشوفلك بورت ${portNum} شغال عليه ايه.`,
+      };
+    }
+  }
+
+  // 10. Open 7 Closed Apps & Known Websites
+  if (lower.startsWith("افتح ") || lower.startsWith("open ")) {
+    const target = lower.replace(/^(?:افتح|open)\s+/, "").trim();
+    const appMap = {
+      "في اس كود": "VS Code",
+      "vs code": "VS Code",
+      "vscode": "VS Code",
+      "انتيجرافيتي": "Antigravity",
+      "انتي جرافيتي": "Antigravity",
+      "antigravity": "Antigravity",
+      "كروم": "Chrome",
+      "جوجل كروم": "Chrome",
+      "chrome": "Chrome",
+      "تيرمينال": "Terminal",
+      "التيرمينال": "Terminal",
+      "terminal": "Terminal",
+      "حاسبه": "Calculator",
+      "الحاسبه": "Calculator",
+      "calculator": "Calculator",
+      "ملفات": "Explorer",
+      "الملفات": "Explorer",
+      "explorer": "Explorer",
+      "نوتباد": "Notepad",
+      "النوتباد": "Notepad",
+      "notepad": "Notepad",
+    };
+    if (appMap[target]) {
+      return {
+        type: "app",
+        appName: appMap[target],
+        tokensUsed: 0,
+        reply: `فتحتلك ${appMap[target]} يا باشا.`,
+      };
+    }
+
+    const urlMap = {
+      "يوتيوب": "https://www.youtube.com",
+      "youtube": "https://www.youtube.com",
+      "جوجل": "https://www.google.com",
+      "google": "https://www.google.com",
+      "فيسبوك": "https://www.facebook.com",
+      "facebook": "https://www.facebook.com",
+      "لينكد ان": "https://www.linkedin.com",
+      "linkedin": "https://www.linkedin.com",
+      "جيت هاب": "https://github.com",
+      "github": "https://github.com",
+      "شات جي بي تي": "https://chatgpt.com",
+      "chatgpt": "https://chatgpt.com",
+      "واتساب": "https://web.whatsapp.com",
+      "whatsapp": "https://web.whatsapp.com",
+    };
+    if (urlMap[target]) {
+      return {
+        type: "url",
+        url: urlMap[target],
+        tokensUsed: 0,
+        reply: `فتحتلك ${target} يا باشا.`,
+      };
+    }
   }
 
   return null;

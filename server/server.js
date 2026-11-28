@@ -9,6 +9,7 @@ import { env } from './config/env.js';
 import { setupSocketHandler } from './sockets/socketHandler.js';
 import { getSystemStatus } from './services/systemService.js';
 import { registerSocketIo } from './ai/llmClient.js';
+import { synthesizeEgyptianSpeech } from './ai/ttsService.js';
 
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
@@ -39,6 +40,26 @@ app.get('/api/network-info', (req, res) => {
 // Health check endpoint
 app.get('/api/health', (req, res) => {
   res.json({ status: 'ok', uptime: process.uptime() });
+});
+
+// Egyptian Male TTS endpoint (ar-EG-ShakirNeural)
+app.post('/api/zaza/tts', async (req, res) => {
+  try {
+    const text = req.body?.text;
+    if (!text || typeof text !== 'string' || !text.trim()) {
+      return res.status(400).json({ error: 'Missing text' });
+    }
+    const audioBuffer = await synthesizeEgyptianSpeech(text);
+    res.set({
+      'Content-Type': 'audio/mpeg',
+      'Content-Length': audioBuffer.length,
+      'Cache-Control': 'no-store',
+    });
+    res.send(audioBuffer);
+  } catch (err) {
+    console.error('[ZAZA TTS Error]:', err.message);
+    res.status(500).json({ error: err.message });
+  }
 });
 
 // SPA fallback for client-side routing (Express 5 compatible)

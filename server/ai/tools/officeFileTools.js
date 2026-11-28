@@ -130,7 +130,7 @@ export const fileOperation = tool({
       .optional()
       .describe('اسم الملف أو المجلد على الديسكتوب أو مساره الكامل'),
   }),
-  execute: async ({ action, target }, options) => {
+  execute: async ({ action, target }, { serverConfirmed = false } = {}) => {
     const desktopDir = path.join(os.homedir(), 'Desktop');
 
     if (action === 'list_desktop') {
@@ -195,7 +195,7 @@ export const fileOperation = tool({
     }
 
     if (action === 'delete') {
-      if (!options?.__serverConfirmed) {
+      if (serverConfirmed !== true) {
         console.warn(`[officeFileTools:fileOperation] Blocked unconfirmed file delete: ${resolvedPath}`);
         const actionId = crypto.randomUUID();
         return {
@@ -221,19 +221,28 @@ export const fileOperation = tool({
         if (!fs.existsSync(resolvedPath)) {
           return {
             success: false,
+            verified: false,
             message: `الملف المطلوب حذفه غير موجود: ${resolvedPath}`,
           };
         }
         fs.rmSync(resolvedPath, { recursive: true, force: true });
+        if (fs.existsSync(resolvedPath)) {
+          return {
+            success: false,
+            verified: false,
+            error: `فشل التحقق من حذف "${path.basename(resolvedPath)}" من القرص.`,
+            message: `فشل التحقق من حذف "${path.basename(resolvedPath)}" من القرص.`,
+          };
+        }
         return {
           success: true,
+          verified: true,
           action: 'delete',
-          confirmed: true,
           path: resolvedPath,
           message: `✓ تم حذف "${path.basename(resolvedPath)}" بنجاح.`,
         };
       } catch (err) {
-        return { success: false, error: err.message };
+        return { success: false, verified: false, error: err.message };
       }
     }
 

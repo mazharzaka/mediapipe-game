@@ -499,10 +499,10 @@ export default function AiAgentTab() {
     }
   }, []);
 
-  // Egyptian Male TTS (Shakir / Hamed / ar-EG male, pitch 0.92, rate 1.05) + Headset Anti-Echo
+  // Egyptian Male TTS (POST /api/zaza/tts -> ar-EG-ShakirNeural, fallback to Web Speech) + Headset Anti-Echo + 6s Watchdog
   const speakReply = useCallback(
-    (rawText, options = {}) => {
-      if (typeof window === "undefined" || !("speechSynthesis" in window)) return;
+    async (rawText, options = {}) => {
+      if (typeof window === "undefined") return;
       const cleanSpeech = String(rawText || "")
         .replace(/[\u{1F300}-\u{1FAFF}\u{2600}-\u{27BF}]/gu, " ")
         .replace(/[✓✕⚠️⚡🛡️🎙️🔊🔉🔇⏯️⬇️⬆️🍿🌙🤖🎯]/g, " ")
@@ -512,10 +512,103 @@ export default function AiAgentTab() {
 
       if (!cleanSpeech) return;
 
-      try {
-        clearTtsResumeTimer();
-        window.speechSynthesis.cancel();
+      clearTtsResumeTimer();
 
+      // Pre-emptively pause recognition before speaking to guarantee zero echo capture (Anti-Echo)
+      isSpeakingRef.current = true;
+      isUserStoppedRef.current = true;
+      isListeningRef.current = false;
+      setIsListening(false);
+      clearModeSwitchTimer();
+      try {
+        recognitionRef.current?.abort();
+      } catch (_) {}
+
+      let resumed = false;
+      let watchdogTimer = null;
+
+      const resumeAfterSpeech = () => {
+        if (resumed) return;
+        resumed = true;
+        if (watchdogTimer) {
+          clearTimeout(watchdogTimer);
+          watchdogTimer = null;
+        }
+        isSpeakingRef.current = false;
+        clearTtsResumeTimer();
+        ttsResumeTimerRef.current = setTimeout(() => {
+          ttsResumeTimerRef.current = null;
+          if (
+            isZakaModeRef.current &&
+            zakaPhaseRef.current !== "disarmed" &&
+            zakaPhaseRef.current !== "mic_error"
+          ) {
+            const targetPhase = options.resumePhase || zakaPhaseRef.current || "standby";
+            zakaPhaseRef.current = targetPhase;
+            setZakaPhase(targetPhase);
+            isUserStoppedRef.current = false;
+            isSilenceCompletedRef.current = false;
+            try {
+              recognitionRef.current?.start();
+            } catch (_) {}
+
+            if (targetPhase === "capturing") {
+              clearZakaAwakeTimer();
+              zakaAwakeTimerRef.current = setTimeout(() => {
+                if (
+                  isZakaModeRef.current &&
+                  zakaPhaseRef.current === "capturing" &&
+                  !finalTranscriptRef.current &&
+                  !latestInterimRef.current
+                ) {
+                  zakaPhaseRef.current = "standby";
+                  setZakaPhase("standby");
+                }
+              }, ZAKA_AWAKE_WINDOW_MS);
+            }
+          }
+        }, 250);
+      };
+
+      // 6s safety Watchdog timer
+      watchdogTimer = setTimeout(() => {
+        resumeAfterSpeech();
+      }, 6000);
+
+      try {
+        const res = await fetch("/api/zaza/tts", {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ text: cleanSpeech }),
+          signal: AbortSignal.timeout(5000),
+        });
+
+        if (!res.ok) throw new Error(`TTS HTTP ${res.status}`);
+        const blob = await res.blob();
+        const url = URL.createObjectURL(blob);
+        const audio = new Audio(url);
+        audio.onended = () => {
+          URL.revokeObjectURL(url);
+          resumeAfterSpeech();
+        };
+        audio.onerror = () => {
+          URL.revokeObjectURL(url);
+          resumeAfterSpeech();
+        };
+        await audio.play();
+        return;
+      } catch (err) {
+        console.warn("[ZAZA TTS Fetch Fallback]:", err?.message || err);
+      }
+
+      // Fallback to browser Web Speech API
+      if (!("speechSynthesis" in window)) {
+        resumeAfterSpeech();
+        return;
+      }
+
+      try {
+        window.speechSynthesis.cancel();
         const utterance = new SpeechSynthesisUtterance(cleanSpeech);
         utterance.lang = "ar-EG";
         utterance.pitch = 0.92;
@@ -531,9 +624,6 @@ export default function AiAgentTab() {
               /ar-EG/i.test(v.lang) &&
               !/salma|hoda|zariyah|fatima|amira|laila|female/i.test(v.name),
           ) ||
-          arVoices.find(
-            (v) => !/salma|hoda|zariyah|fatima|amira|laila|female/i.test(v.name),
-          ) ||
           arVoices[0] ||
           null;
 
@@ -542,69 +632,12 @@ export default function AiAgentTab() {
           utterance.lang = selectedVoice.lang || "ar-EG";
         }
 
-        const resumeAfterSpeech = () => {
-          isSpeakingRef.current = false;
-          clearTtsResumeTimer();
-          ttsResumeTimerRef.current = setTimeout(() => {
-            ttsResumeTimerRef.current = null;
-            if (
-              isZakaModeRef.current &&
-              zakaPhaseRef.current !== "disarmed" &&
-              zakaPhaseRef.current !== "mic_error"
-            ) {
-              const targetPhase = options.resumePhase || zakaPhaseRef.current || "standby";
-              zakaPhaseRef.current = targetPhase;
-              setZakaPhase(targetPhase);
-              isUserStoppedRef.current = false;
-              isSilenceCompletedRef.current = false;
-              try {
-                recognitionRef.current?.start();
-              } catch (_) {}
-
-              if (targetPhase === "capturing") {
-                clearZakaAwakeTimer();
-                zakaAwakeTimerRef.current = setTimeout(() => {
-                  if (
-                    isZakaModeRef.current &&
-                    zakaPhaseRef.current === "capturing" &&
-                    !finalTranscriptRef.current &&
-                    !latestInterimRef.current
-                  ) {
-                    zakaPhaseRef.current = "standby";
-                    setZakaPhase("standby");
-                  }
-                }, ZAKA_AWAKE_WINDOW_MS);
-              }
-            }
-          }, RECOGNITION_RESTART_DELAY_MS);
-        };
-
-        utterance.onstart = () => {
-          isSpeakingRef.current = true;
-          clearModeSwitchTimer();
-          // Pause SpeechRecognition temporarily while ZAZA speaks (Headset Anti-Echo)
-          isUserStoppedRef.current = true;
-          isListeningRef.current = false;
-          setIsListening(false);
-          try {
-            recognitionRef.current?.abort();
-          } catch (_) {}
-        };
-
         utterance.onend = resumeAfterSpeech;
         utterance.onerror = resumeAfterSpeech;
-
-        // Pre-emptively pause recognition before speaking to guarantee zero echo capture
-        isSpeakingRef.current = true;
-        isUserStoppedRef.current = true;
-        try {
-          recognitionRef.current?.abort();
-        } catch (_) {}
-
         window.speechSynthesis.speak(utterance);
       } catch (err) {
-        console.warn("[ZAZA TTS Error]:", err);
-        isSpeakingRef.current = false;
+        console.warn("[ZAZA WebSpeech Fallback Error]:", err);
+        resumeAfterSpeech();
       }
     },
     [clearModeSwitchTimer, clearTtsResumeTimer, clearZakaAwakeTimer],
@@ -1311,7 +1344,6 @@ export default function AiAgentTab() {
     if (!pendingAction) return;
     socket.emit("ai_confirm_action", {
       actionId: pendingAction.id,
-      action: pendingAction.action,
       confirmed,
     });
     if (!confirmed) {

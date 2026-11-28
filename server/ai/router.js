@@ -63,6 +63,13 @@ export const routeOutputSchema = z.object({
   reasoning: z
     .string()
     .describe('سبب موجز جداً (5 إلى 8 كلمات باللغة العربية) يوضح اختيار المجال ومستوى الصعوبة'),
+  directCall: z
+    .object({
+      tool: z.string().describe('اسم الأداة المباشرة للتنفيذ الفوري بدون LLM ثانٍ'),
+      args: z.record(z.any()).optional().describe('معاملات الأداة'),
+    })
+    .optional()
+    .describe('استخدمه فقط للمهام البسيطة الواضحة التي تنفذ بأداة واحدة مباشرة'),
 });
 
 const ROUTER_SYSTEM_PROMPT = `أنت "المصفّي والموجّه الدلالي الذكي" (Semantic Router & Normalizer) لنظام التحكم المساعد في الحاسوب بالعامية المصرية.
@@ -341,14 +348,22 @@ export async function routeCommand(rawTranscript) {
   }
 
   const normalizedInput = normalizeEgyptianTranscript(rawText);
-  const desktopFiles = getDesktopFilesContext();
-  const promptContent = [
+  const needsDesktopFiles = /(?:ملف|ملفات|ديسكتوب|سطح\s*المكتب|اكسيل|إكسيل|شيت|بوك|فولدر|مجلد|xlsx|csv|txt|pdf|excel|desktop|file|folder)/i.test(
+    normalizedInput
+  );
+  const promptParts = [
     `الطلب الصوتي للمستخدم (بعد التطبيع الصوتي المبدئي):`,
     `"${normalizedInput}"`,
-    ``,
-    `ملفات سطح المكتب (Desktop) المتاحة حالياً على جهاز المستخدم:`,
-    desktopFiles.length > 0 ? desktopFiles.map((f) => `- ${f}`).join('\n') : '(لا توجد ملفات حالياً على Desktop)',
-  ].join('\n');
+  ];
+  if (needsDesktopFiles) {
+    const desktopFiles = getDesktopFilesContext();
+    promptParts.push(
+      ``,
+      `ملفات سطح المكتب (Desktop) المتاحة حالياً على جهاز المستخدم:`,
+      desktopFiles.length > 0 ? desktopFiles.map((f) => `- ${f}`).join('\n') : '(لا توجد ملفات حالياً على Desktop)'
+    );
+  }
+  const promptContent = promptParts.join('\n');
 
   try {
     const { result, meta } = await generateObjectWithFallback({
@@ -378,6 +393,7 @@ export async function routeCommand(rawTranscript) {
       maxSteps,
       timeoutMs,
       reasoning: output.reasoning,
+      directCall: output.directCall || null,
       meta,
     };
   } catch (err) {
