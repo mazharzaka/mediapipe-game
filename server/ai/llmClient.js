@@ -351,14 +351,14 @@ export async function executeWithFallback(operationFn, options = {}) {
       const isLastCandidate = i === candidates.length - 1;
       const isRateLimit = err.statusCode === 429 || err.status === 429 || /429|rate limit/i.test(err.message || '');
       candidate._retryCount = candidate._retryCount || 0;
-      if (isLastCandidate && isRateLimit && candidate._retryCount < 4) {
+      if (isLastCandidate && isRateLimit && candidate._retryCount < 1) {
         const headerRetry = Number(err.responseHeaders?.get?.('retry-after') || err.headers?.['retry-after'] || 0);
         const msgMatch = (err.message || '').match(/try(?:ing)? again in\s+([\d.]+)s|retry in\s+([\d.]+)s/i);
         const parsedFromMsg = msgMatch ? Math.ceil(Number(msgMatch[1] || msgMatch[2])) : 0;
-        const parsedSec = headerRetry || parsedFromMsg || 6;
-        const retrySec = Math.min(Math.max(parsedSec, 2), 25);
-        console.warn(`[llmClient] ⏳ Rate limit on final candidate (${candidate.modelName}). Waiting ${retrySec}s before retry (${candidate._retryCount + 1}/4)...`);
-        await new Promise((r) => setTimeout(r, (retrySec + 2) * 1000));
+        const parsedMs = (headerRetry || parsedFromMsg || 3) * 1000;
+        const retryMs = Math.min(Math.max(parsedMs, 1000), 5000);
+        console.warn(`[llmClient] ⏳ Rate limit on final candidate (${candidate.modelName}). Waiting ${retryMs}ms before single retry (1/1)...`);
+        await new Promise((r) => setTimeout(r, retryMs));
         candidate._retryCount += 1;
         i--;
         continue;

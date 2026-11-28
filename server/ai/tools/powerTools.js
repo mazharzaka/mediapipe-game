@@ -1,28 +1,24 @@
 import { tool } from 'ai';
 import { z } from 'zod';
 import { exec } from 'child_process';
+import crypto from 'crypto';
 
 /**
  * AI Tool: System Power Controller with Human-in-the-Loop safety guard
  */
 export const controlPower = tool({
   description:
-    'التحكم في أوامر الطاقة للنظام (Lock, Sleep, Shutdown, Restart, Cancel Shutdown). الأوامر الحساسة مثل Shutdown و Restart تتطلب تأكيداً صريحاً (confirmed: true) قبل التنفيذ لحماية عمل المستخدم.',
+    'التحكم في أوامر الطاقة للنظام (Lock, Sleep, Shutdown, Restart, Cancel Shutdown). الأوامر الحساسة مثل Shutdown و Restart تتطلب تأكيداً بشرياً من المستخدم عبر الواجهة قبل التنفيذ لحماية عمل المستخدم.',
   inputSchema: z.object({
     action: z
       .enum(['lock', 'sleep', 'shutdown', 'restart', 'cancel_shutdown'])
       .describe('نوع إجراء الطاقة المطلوب تنفيذه'),
-    confirmed: z
-      .boolean()
-      .optional()
-      .default(false)
-      .describe('يجب أن تكون true لتنفيذ أوامر الإغلاق أو إعادة التشغيل. إذا كانت false لن يتم التنفيذ وسيطلب تأكيد المستخدم.'),
     reason: z
       .string()
       .optional()
       .describe('سبب أو توضيح إضافي لأمر الطاقة'),
   }),
-  execute: async ({ action, confirmed, reason }) => {
+  execute: async ({ action, reason }, options) => {
     // 1. Lock screen: Instant and fully safe
     if (action === 'lock') {
       return new Promise((resolve) => {
@@ -79,16 +75,20 @@ export const controlPower = tool({
       restart: 'إعادة تشغيل الكمبيوتر (Restart)',
     };
 
-    if (!confirmed) {
+    if (!options?.__serverConfirmed) {
       console.warn(`[powerTools:controlPower] Blocked unconfirmed power action: ${action}`);
+      const actionId = crypto.randomUUID();
       return {
         success: false,
         status: 'awaiting_confirmation',
         requiresConfirmation: true,
         action,
         pendingAction: {
-          id: `power_${action}_${Date.now()}`,
+          id: actionId,
+          toolName: 'controlPower',
+          realAction: action,
           action,
+          args: { action, reason },
           title: actionTitles[action] || action,
           reason: reason || 'طلب أمر طاقة من المساعد الذكي',
         },

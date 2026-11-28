@@ -5,6 +5,7 @@ import fs from 'fs';
 import path from 'path';
 import os from 'os';
 import { spawn } from 'child_process';
+import crypto from 'crypto';
 
 /**
  * Resolve a file/folder path: if relative, resolve against user's Desktop directory.
@@ -128,13 +129,8 @@ export const fileOperation = tool({
       .string()
       .optional()
       .describe('اسم الملف أو المجلد على الديسكتوب أو مساره الكامل'),
-    confirmed: z
-      .boolean()
-      .optional()
-      .default(false)
-      .describe('يجب أن تكون true فقط عند تأكيد المستخدم الصريح لعملية الحذف delete'),
   }),
-  execute: async ({ action, target, confirmed = false }) => {
+  execute: async ({ action, target }, options) => {
     const desktopDir = path.join(os.homedir(), 'Desktop');
 
     if (action === 'list_desktop') {
@@ -199,8 +195,9 @@ export const fileOperation = tool({
     }
 
     if (action === 'delete') {
-      if (!confirmed) {
+      if (!options?.__serverConfirmed) {
         console.warn(`[officeFileTools:fileOperation] Blocked unconfirmed file delete: ${resolvedPath}`);
+        const actionId = crypto.randomUUID();
         return {
           success: false,
           status: 'awaiting_confirmation',
@@ -208,8 +205,11 @@ export const fileOperation = tool({
           action: 'delete',
           target: resolvedPath,
           pendingAction: {
-            id: `file_delete_${Date.now()}`,
+            id: actionId,
+            toolName: 'fileOperation',
+            realAction: 'delete',
             action: 'delete',
+            args: { action, target },
             title: `تأكيد حذف الملف: ${path.basename(resolvedPath)}`,
             reason: `حذف الملف أو المجلد (${resolvedPath}) إجراء حساس لا يمكن التراجع عنه`,
           },

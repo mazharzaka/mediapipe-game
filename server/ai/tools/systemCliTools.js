@@ -4,6 +4,7 @@ import { spawn, exec } from 'child_process';
 import path from 'path';
 import fs from 'fs';
 import os from 'os';
+import crypto from 'crypto';
 
 /**
  * Intelligent Windows application resolver.
@@ -141,10 +142,45 @@ export const runTerminalCommand = tool({
       .optional()
       .describe('ضع true إذا كان الأمر يستمر في العمل مثل dev server أو مراقب ملفات'),
   }),
-  execute: async ({ command, cwd, isLongRunning }) => {
+  execute: async ({ command, cwd, isLongRunning }, options) => {
     const trimmedCommand = (command || '').trim();
     if (!trimmedCommand) {
       return { success: false, exitCode: 1, stdout: '', stderr: 'لم يتم تمرير أي أمر للتنفيذ.' };
+    }
+
+    // Programmatic Guardrail: Block destructive terminal commands without server-side human confirmation
+    const lowerCmd = trimmedCommand.toLowerCase();
+    const destructivePatterns = [
+      /\bshutdown\b/,
+      /\bdel\b/,
+      /\brd\s+\/s\b/,
+      /\brmdir\b/,
+      /\bformat\b/,
+      /\btaskkill\b/,
+      /\breg\s+delete\b/,
+      /\bremove-item\b/,
+      /\bdiskpart\b/,
+    ];
+    const isDestructive = destructivePatterns.some((rx) => rx.test(lowerCmd));
+    if (isDestructive && !options?.__serverConfirmed) {
+      console.warn(`[systemCliTools:runTerminalCommand] Blocked unconfirmed destructive command: ${trimmedCommand}`);
+      const actionId = crypto.randomUUID();
+      return {
+        success: false,
+        status: 'awaiting_confirmation',
+        requiresConfirmation: true,
+        action: 'terminal_command',
+        pendingAction: {
+          id: actionId,
+          toolName: 'runTerminalCommand',
+          realAction: 'terminal_command',
+          action: 'terminal_command',
+          args: { command: trimmedCommand, cwd, isLongRunning },
+          title: `تأكيد تنفيذ أمر خطير في التيرمنال`,
+          reason: `الأمر "${trimmedCommand}" قد يحذف ملفات أو يوقف النظام/العمليات ويتطلب تأكيدك الصريح.`,
+        },
+        message: `⚠️ تنبيه: تم حجب تنفيذ الأمر "${trimmedCommand}" لأنه يحتوي على عملية حساسة/مدمرة، ويتطلب تأكيدك الصريح عبر زر الموافقة أولاً.`,
+      };
     }
 
     const defaultCwd = path.resolve(process.cwd(), '..'); // project root or cwd
@@ -229,13 +265,8 @@ export const listOrKillProcess = tool({
     port: z.number().optional().describe('رقم المنفذ (البورت) للبحث عنه عند اختيار find_port (مثل: 3000, 5173)'),
     processName: z.string().optional().describe('اسم البرنامج مثل node.exe أو Code.exe للبحث أو الإغلاق'),
     pid: z.number().optional().describe('معرف العملية (PID) لإنهائها بدقة عند اختيار kill'),
-    confirmed: z
-      .boolean()
-      .optional()
-      .default(false)
-      .describe('يجب أن تكون true فقط بعد موافقة المستخدم الصريحة على قتل/إنهاء العملية kill'),
   }),
-  execute: async ({ action, port, processName, pid, confirmed = false }) => {
+  execute: async ({ action, port, processName, pid }, options) => {
     if (action === 'find_port') {
       if (!port) {
         return { success: false, error: 'يجب تحديد رقم البورت (port) للبحث عنه.' };
@@ -265,8 +296,9 @@ export const listOrKillProcess = tool({
 
     if (action === 'kill') {
       const targetDesc = pid ? `PID ${pid}` : processName || 'عملية غير محددة';
-      if (!confirmed) {
+      if (!options?.__serverConfirmed) {
         console.warn(`[systemCliTools:listOrKillProcess] Blocked unconfirmed process kill: ${targetDesc}`);
+        const actionId = crypto.randomUUID();
         return {
           success: false,
           status: 'awaiting_confirmation',
@@ -274,8 +306,11 @@ export const listOrKillProcess = tool({
           action: 'kill',
           target: targetDesc,
           pendingAction: {
-            id: `proc_kill_${Date.now()}`,
+            id: actionId,
+            toolName: 'listOrKillProcess',
+            realAction: 'kill',
             action: 'kill',
+            args: { action, port, processName, pid },
             title: `تأكيد إنهاء العملية: ${targetDesc}`,
             reason: `إنهاء العملية (${targetDesc}) بالإجبار قد يؤدي لفقدان بيانات غير محفوظة`,
           },

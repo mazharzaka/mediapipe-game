@@ -1,3 +1,4 @@
+import crypto from "crypto";
 import * as nutService from "../services/nutService.js";
 import * as systemService from "../services/systemService.js";
 import {
@@ -470,13 +471,35 @@ export function setupSocketHandler(io) {
 
       // Human-in-the-Loop Guard: If router determined this is a critical action (e.g. Shutdown, Restart)
       // halt immediate execution and prompt user for explicit confirmation
-      if (requiresConfirmation && !payload?.confirmed) {
-        const actionId = `req_confirm_${Date.now()}_${Math.random().toString(36).slice(2, 7)}`;
+      if (requiresConfirmation) {
+        const actionId = crypto.randomUUID();
+        const inferRealAction = (txt, dom) => {
+          const t = (txt || "").toLowerCase();
+          if (/\brestart\b|إعادة تشغيل|اعاده تشغيل|رستر/.test(t)) return "restart";
+          if (/\bshutdown\b|إيقاف تشغيل|ايقاف تشغيل|اقفل الجهاز|طفي الجهاز/.test(t)) return "shutdown";
+          if (/\bkill\b|taskkill|اقفل برنامج|انهي عملية/.test(t)) return "kill";
+          if (/\bdelete\b|حذف|امسح|احذف/.test(t)) return "delete";
+          return dom === "power" ? "shutdown" : "sensitive_action";
+        };
+        const realAction = inferRealAction(effectiveText, effectiveDomain);
+        const toolName =
+          realAction === "restart" || realAction === "shutdown"
+            ? "controlPower"
+            : realAction === "kill"
+              ? "listOrKillProcess"
+              : realAction === "delete"
+                ? "fileOperation"
+                : null;
+
         pendingActionsMap.set(actionId, {
           socketId: socket.id,
           isRouterConfirmation: true,
           actionId,
-          action: effectiveDomain === 'power' ? 'shutdown' : 'sensitive_action',
+          toolName,
+          realAction,
+          action: realAction,
+          args: toolName === "controlPower" ? { action: realAction, reason: effectiveText } : {},
+          expiresAt: Date.now() + 30000,
           prompt: effectiveText,
           history,
           routeInfo,
@@ -487,12 +510,12 @@ export function setupSocketHandler(io) {
           filteredTools,
         });
 
-        console.log(`[Router Guard] Halted command awaiting confirmation: "${effectiveText}" (Action ID: ${actionId})`);
+        console.log(`[Router Guard] Halted command awaiting confirmation: "${effectiveText}" (Action ID: ${actionId}, realAction: ${realAction})`);
 
         socket.emit("ai_confirmation_required", {
           id: actionId,
           actionId,
-          action: effectiveDomain === 'power' ? 'shutdown' : 'sensitive_action',
+          action: realAction,
           title: `تأكيد أمر حساس: ${effectiveText}`,
           cleanText: effectiveText,
           domain: effectiveDomain,
@@ -505,7 +528,7 @@ export function setupSocketHandler(io) {
           requiresConfirmation: true,
           pendingAction: {
             id: actionId,
-            action: effectiveDomain === 'power' ? 'shutdown' : 'sensitive_action',
+            action: realAction,
             title: `تأكيد أمر حساس: ${effectiveText}`,
             reason: routeInfo?.reasoning || "أمر حساس يتطلب موافقة صريحة قبل التنفيذ",
           },
@@ -599,10 +622,16 @@ export function setupSocketHandler(io) {
 
               if (res && res.requiresConfirmation && res.pendingAction) {
                 pendingAction = res.pendingAction;
-                pendingActionsMap.set(res.pendingAction.id, {
+                const actionId = res.pendingAction.id || crypto.randomUUID();
+                pendingAction.id = actionId;
+                pendingActionsMap.set(actionId, {
                   socketId: socket.id,
-                  action: res.pendingAction.action,
-                  actionId: res.pendingAction.id,
+                  toolName: res.pendingAction.toolName || part.toolName,
+                  realAction: res.pendingAction.realAction || res.pendingAction.action,
+                  action: res.pendingAction.realAction || res.pendingAction.action,
+                  args: res.pendingAction.args || part.args || part.input || {},
+                  actionId,
+                  expiresAt: Date.now() + 30000,
                 });
               }
 
@@ -619,7 +648,18 @@ export function setupSocketHandler(io) {
             }
           }
 
-          if (streamHasError && !receivedAnyText && isDemandOrQuotaError(lastHandledError) && mIdx < candidateModels.length - 1) {
+          if (streamHasError && executedTools.length > 0) {
+            const lastToolMsg = executedTools[executedTools.length - 1]?.result?.message;
+            console.warn(`[AI Stream] Error after executing ${executedTools.length} tool(s). Returning executed tool result without fallback re-execution.`);
+            socket.emit("ai_stream_done", {
+              text: fullText || lastToolMsg || "تم تنفيذ الأداة بنجاح.",
+              executedTools,
+              pendingAction,
+            });
+            break;
+          }
+
+          if (streamHasError && !receivedAnyText && executedTools.length === 0 && isDemandOrQuotaError(lastHandledError) && mIdx < candidateModels.length - 1) {
             console.warn(`[AI Stream] Switching from ${currentModel} to next candidate model...`);
             continue;
           }
@@ -641,10 +681,16 @@ export function setupSocketHandler(io) {
                   executedTools.push(tInfo);
                   if (resObj && resObj.requiresConfirmation && resObj.pendingAction) {
                     pendingAction = resObj.pendingAction;
-                    pendingActionsMap.set(resObj.pendingAction.id, {
+                    const actionId = resObj.pendingAction.id || crypto.randomUUID();
+                    pendingAction.id = actionId;
+                    pendingActionsMap.set(actionId, {
                       socketId: socket.id,
-                      action: resObj.pendingAction.action,
-                      actionId: resObj.pendingAction.id,
+                      toolName: resObj.pendingAction.toolName || rec.toolName,
+                      realAction: resObj.pendingAction.realAction || resObj.pendingAction.action,
+                      action: resObj.pendingAction.realAction || resObj.pendingAction.action,
+                      args: resObj.pendingAction.args || rec.args || {},
+                      actionId,
+                      expiresAt: Date.now() + 30000,
                     });
                   }
                 }
@@ -662,7 +708,17 @@ export function setupSocketHandler(io) {
           }
         } catch (err) {
           console.error(`[AI Execution Error on ${currentModel}]:`, err.message);
-          if (!receivedAnyText && isDemandOrQuotaError(err) && mIdx < candidateModels.length - 1) {
+          if (executedTools.length > 0) {
+            const lastToolMsg = executedTools[executedTools.length - 1]?.result?.message;
+            console.warn(`[AI Stream Catch] Error after executing ${executedTools.length} tool(s). Returning executed tool result without fallback re-execution.`);
+            socket.emit("ai_stream_done", {
+              text: fullText || lastToolMsg || "تم تنفيذ الأداة بنجاح.",
+              executedTools,
+              pendingAction,
+            });
+            break;
+          }
+          if (!receivedAnyText && executedTools.length === 0 && isDemandOrQuotaError(err) && mIdx < candidateModels.length - 1) {
             console.warn(`[AI Stream Catch] Model ${currentModel} failed with 503/429. Trying next fallback model...`);
             continue;
           }
@@ -672,18 +728,41 @@ export function setupSocketHandler(io) {
       }
     });
 
-    // Human-in-the-Loop Confirmation for sensitive actions (shutdown, lock, sleep)
-    socket.on("ai_confirm_action", async ({ actionId, action, confirmed }) => {
+    // Human-in-the-Loop Confirmation for sensitive actions (server-authoritative)
+    socket.on("ai_confirm_action", async ({ actionId, confirmed }) => {
+      const pending = actionId ? pendingActionsMap.get(actionId) : null;
       console.log(
-        `[AI HITL] Confirmation received: ${actionId}, action: ${action}, confirmed: ${confirmed}`,
+        `[AI HITL] Confirmation received: ${actionId}, confirmed: ${confirmed}, found: ${Boolean(pending)}`,
       );
+
+      if (!pending || pending.socketId !== socket.id) {
+        socket.emit("ai_action_confirmed", {
+          actionId,
+          success: false,
+          error: "طلب التأكيد غير صالح أو لا يخص هذا الاتصال.",
+        });
+        return;
+      }
+
+      if (pending.expiresAt && Date.now() > pending.expiresAt) {
+        pendingActionsMap.delete(actionId);
+        socket.emit("ai_action_confirmed", {
+          actionId,
+          action: pending.realAction,
+          success: false,
+          error: "انتهت صلاحية طلب التأكيد (30 ثانية). يرجى إعادة الطلب.",
+        });
+        return;
+      }
+
+      const realAction = pending.realAction || pending.action;
 
       if (!confirmed) {
         pendingActionsMap.delete(actionId);
         socket.emit("ai_action_cancelled", {
           actionId,
-          action,
-          message: `تم إلغاء أمر الطاقة (${action}) بأمان بناءً على رغبتك.`,
+          action: realAction,
+          message: `تم إلغاء الإجراء (${realAction}) بأمان بناءً على رغبتك.`,
         });
         return;
       }
@@ -691,26 +770,40 @@ export function setupSocketHandler(io) {
       try {
         pendingActionsMap.delete(actionId);
         socket.emit("ai_stream_chunk", {
-          chunk: `\n[جاري تنفيذ أمر الطاقة: ${action}...]`,
-          fullText: `تم التأكيد. جاري تنفيذ أمر الطاقة (${action}) الآن.`,
+          chunk: `\n[جاري تنفيذ الإجراء المؤكد: ${realAction}...]`,
+          fullText: `تم التأكيد. جاري تنفيذ الإجراء (${realAction}) الآن.`,
         });
 
-        const execResult = await systemService.executePowerAction(action);
+        let execResult;
+        if (pending.toolName && aiTools[pending.toolName]) {
+          execResult = await aiTools[pending.toolName].execute(pending.args || {}, {
+            __serverConfirmed: true,
+          });
+        } else {
+          execResult = await systemService.executePowerAction(realAction);
+        }
+
         socket.emit("ai_action_confirmed", {
           actionId,
-          action,
-          success: true,
-          message: execResult.message,
+          action: realAction,
+          success: execResult?.success !== false,
+          message: execResult?.message || "تم التنفيذ.",
         });
         socket.emit("ai_stream_done", {
-          text: `تم التأكيد وتنفيذ أمر الطاقة (${action}) بنجاح: ${execResult.message}`,
-          executedTools: [{ name: "controlPower", args: { action, confirmed: true }, result: execResult }],
+          text: `تم التأكيد وتنفيذ الإجراء (${realAction}) بنجاح: ${execResult?.message || ""}`,
+          executedTools: [
+            {
+              name: pending.toolName || "controlPower",
+              args: pending.args || { action: realAction },
+              result: execResult,
+            },
+          ],
         });
       } catch (err) {
         console.error("[AI HITL Execution Error]:", err);
         socket.emit("ai_action_confirmed", {
           actionId,
-          action,
+          action: realAction,
           success: false,
           error: err.message,
         });
